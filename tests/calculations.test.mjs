@@ -7,7 +7,26 @@ import {
   getTariffByHour,
   getCountdown,
   loadAt,
+  describePfSurcharge,
+  surchargeTone,
+  hourlyCostJd,
+  motorTempTone,
+  runGapSec,
 } from '../src/lib/calculations.ts';
+
+test('the AI prompt gets the same surcharge tiers the dashboard bills with', () => {
+  assert.equal(describePfSurcharge(), '0.85-0.89 = +1.5%, 0.80-0.84 = +3.5%, 0.75-0.79 = +6.5%, below 0.75 = +12%');
+});
+
+test('shared severity, cost and gap rules', () => {
+  assert.deepEqual([0, 1.5, 3.5, 6.5, 12].map(surchargeTone), ['ok', 'warn', 'warn', 'crit', 'crit']);
+  assert.deepEqual([59.9, 60, 74.9, 75].map(motorTempTone), ['ok', 'warn', 'warn', 'crit']);
+  assert.equal(hourlyCostJd(1000, 79, 0), 79); // 1 MW for an hour at 79 fils/kWh
+  assert.ok(Math.abs(hourlyCostJd(0.1369, 59, 1.5) * 1000 - 8.2) < 0.05); // the live card's "8.2 fils an hour"
+  assert.equal(runGapSec(18), 180); // 3-minute floor
+  assert.equal(runGapSec(60), 300); // or 5 intervals
+  assert.equal(runGapSec(null), 180);
+});
 
 const scenario = (powerFactor, peakShiftPct = 25) => ({
   timeOfDay: 18,

@@ -1,9 +1,11 @@
 // ============================================================================
-// Plant Pulse — tariff and billing rules, the single source for the dashboard
+// Plant Pulse — tariff, billing and plant-limit rules: the single source for the
+// dashboard, the API routes and the AI prompt
 // EMRC Medium-Industry Tariff Schedule for Zarqa, Jordan
 // ============================================================================
 
 export type Band = 'Off-Peak' | 'Partial-Peak' | 'Peak';
+export type Tone = 'ok' | 'warn' | 'crit';
 
 export interface TariffSegment {
   start: number; // hour, inclusive
@@ -52,13 +54,57 @@ export function getCountdown(hour: number): { countdownText: string; targetBand:
   };
 }
 
+// Price colour of each band (badges, chart): cheap is fine, peak is red
+export const BAND_TONE: Record<Band, Tone> = { 'Off-Peak': 'ok', 'Partial-Peak': 'warn', Peak: 'crit' };
+
+// EMRC power-factor surcharge tiers: at or above minPf, pct of the bill is added
+const PF_TIERS = [
+  { minPf: 0.9, pct: 0 },
+  { minPf: 0.85, pct: 1.5 },
+  { minPf: 0.8, pct: 3.5 },
+  { minPf: 0.75, pct: 6.5 },
+  { minPf: 0, pct: 12 },
+];
+
 // EMRC power-factor surcharge, in percent of the bill
 export function getPowerFactorSurchargePct(pf: number): number {
-  if (pf >= 0.9) return 0;
-  if (pf >= 0.85) return 1.5;
-  if (pf >= 0.8) return 3.5;
-  if (pf >= 0.75) return 6.5;
-  return 12;
+  return (PF_TIERS.find((t) => pf >= t.minPf) ?? PF_TIERS[PF_TIERS.length - 1]).pct;
+}
+
+// "0.85-0.89 = +1.5%, …, below 0.75 = +12%", for the AI prompt
+export function describePfSurcharge(): string {
+  return PF_TIERS.slice(1)
+    .map((t, i) => {
+      const above = PF_TIERS[i].minPf;
+      return t.minPf === 0
+        ? `below ${above.toFixed(2)} = +${t.pct}%`
+        : `${t.minPf.toFixed(2)}-${(above - 0.01).toFixed(2)} = +${t.pct}%`;
+    })
+    .join(', ');
+}
+
+// How serious a surcharge is: any surcharge needs attention, the top tiers are critical
+export function surchargeTone(pct: number): Tone {
+  return pct >= 6.5 ? 'crit' : pct > 0 ? 'warn' : 'ok';
+}
+
+// Cost of running a load for one hour, in JD (rate in fils/kWh, 1 JD = 1000 fils)
+export function hourlyCostJd(kw: number, rateFils: number, surchargePct: number): number {
+  return ((kw * rateFils) / 1000) * (1 + surchargePct / 100);
+}
+
+// Motor temperature limits (plant alarm levels, °C)
+export const MOTOR_TEMP_WARN_C = 60;
+export const MOTOR_TEMP_ALARM_C = 75;
+export function motorTempTone(c: number): Tone {
+  return c >= MOTOR_TEMP_ALARM_C ? 'crit' : c >= MOTOR_TEMP_WARN_C ? 'warn' : 'ok';
+}
+
+// A pause longer than this means the device stopped: it starts a new run, and if it is the
+// latest reading the device counts as offline. ThingSpeak's free plan takes one update per 15 s
+// and Wokwi can run slow, so allow 3 minutes or 5 sending intervals, whichever is longer.
+export function runGapSec(medianIntervalSec: number | null): number {
+  return Math.max(180, (medianIntervalSec ?? 20) * 5);
 }
 
 // Same surcharge as a fraction (0.015 = 1.5%)

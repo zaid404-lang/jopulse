@@ -1,4 +1,10 @@
-import { fetchReadings, summarise, type Reading } from '@/lib/thingspeak';
+import { fetchReadings, summarise, SIM_TEMP, type Reading } from '@/lib/thingspeak';
+import { describePfSurcharge, MOTOR_TEMP_WARN_C, MOTOR_TEMP_ALARM_C } from '@/lib/calculations';
+
+// limits in the prompt come from the same constants the dashboard uses
+const WARN = `${MOTOR_TEMP_WARN_C} °C`;
+const ALARM = `${MOTOR_TEMP_ALARM_C} °C`;
+const SIM_PLATEAU = `${SIM_TEMP.ambientC + SIM_TEMP.riseAtFullLoadC} °C`;
 
 // AI diagnostics: a BluesMinds model reads the machine's recent ThingSpeak
 // history and writes an early-warning assessment. BluesMinds speaks the
@@ -12,8 +18,8 @@ You receive recent readings from one energy monitor (an ESP32 simulated in Wokwi
 - power (W): active power.
 - energy (kWh): counter since the device last started. A drop means the device restarted.
 - status: 1 means running; anything else means stopped or faulted.
-- pf: power factor, derived as power / (voltage x current). Under the EMRC medium-industry tariff a power factor below 0.90 adds a surcharge: 0.85-0.89 = +1.5%, 0.80-0.84 = +3.5%, 0.75-0.79 = +6.5%, below 0.75 = +12%.
-- temperature (°C): motor temperature from a sensor on the machine. The plant warns at 60 °C and alarms at 75 °C. Older readings were taken before the sensor was fitted and have it blank; if every reading is blank, say temperature isn't being reported yet.
+- pf: power factor, derived as power / (voltage x current). Under the EMRC medium-industry tariff a power factor below 0.90 adds a surcharge: ${describePfSurcharge()}.
+- temperature (°C): motor temperature from a sensor on the machine. The plant warns at ${WARN} and alarms at ${ALARM}. Older readings were taken before the sensor was fitted and have it blank; if every reading is blank, say temperature isn't being reported yet.
 
 Your job: say whether the machine looks healthy, point out anything drifting or abnormal, and warn about failures that the trends suggest, before they happen.
 
@@ -21,7 +27,7 @@ How to answer:
 - Base every claim on the numbers given. Quote the actual values and times.
 - When you extrapolate a trend, give the estimate as a range and say how confident you are. With only a few dozen readings over minutes, confidence is low; say so plainly instead of overstating.
 - Rising current at steady voltage and power factor can mean growing mechanical load (bearing wear, clogging, misalignment). Falling power factor can mean motor winding or capacitor problems. Voltage sag or swell stresses insulation. Restarts and gaps can mean supply or controller faults. Use these as hypotheses, not diagnoses.
-- Always assess temperature, and read it together with current: temperature rising with current suggests overload or bearing friction; temperature rising at steady current suggests a cooling problem (blocked fan or vents, high ambient). Heat ages motor insulation fast (roughly half the life for every 10 °C over its rating), so estimate when the temperature would reach 60 °C and 75 °C if the trend continues, with a range and your confidence.
+- Always assess temperature, and read it together with current: temperature rising with current suggests overload or bearing friction; temperature rising at steady current suggests a cooling problem (blocked fan or vents, high ambient). Heat ages motor insulation fast (roughly half the life for every 10 °C over its rating), so estimate when the temperature would reach ${WARN} and ${ALARM} if the trend continues, with a range and your confidence.
 - If the data stopped arriving, say when and treat that as the first finding.
 - Write for a plant manager, not an engineer: short sentences, no jargon without a plain explanation.
 
@@ -107,7 +113,7 @@ export async function POST() {
 Minutes since the last reading arrived: ${ageMin}
 ${
   temperatureSimulated
-    ? 'Temperature: no sensor reports yet, so temperature_c is SIMULATED from current: a heating curve from 30 °C ambient that levels off at about 52 °C at full load (0.7 A) and cannot go higher at that load, so do not extrapolate it in a straight line and do not predict it reaching 60 °C or 75 °C unless the current rises well above 0.7 A. Analyse it, but say clearly that it is an estimate, not a measurement.\n'
+    ? `Temperature: no sensor reports yet, so temperature_c is SIMULATED from current: a heating curve from ${SIM_TEMP.ambientC} °C ambient that levels off at about ${SIM_PLATEAU} at full load (${SIM_TEMP.fullLoadA} A) and cannot go higher at that load, so do not extrapolate it in a straight line and do not predict it reaching ${WARN} or ${ALARM} unless the current rises well above ${SIM_TEMP.fullLoadA} A. Analyse it, but say clearly that it is an estimate, not a measurement.\n`
     : ''
 }
 Summary statistics (slopes are per hour, least squares):

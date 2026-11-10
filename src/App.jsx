@@ -45,6 +45,13 @@ import {
   getPowerFactorSurchargePct,
   loadAt,
   computeFinancials,
+  BAND_TONE,
+  surchargeTone,
+  hourlyCostJd,
+  MOTOR_TEMP_WARN_C,
+  MOTOR_TEMP_ALARM_C,
+  motorTempTone,
+  runGapSec,
 } from './lib/calculations';
 
 // ---------------------------------------------------------------------------
@@ -259,10 +266,6 @@ const soloDot = (color) =>
     return <circle key={`d${index}`} cx={cx} cy={cy} r={4.5} fill={color} stroke="var(--shell)" strokeWidth={2} />;
   };
 
-// Motor temperature limits (plant alarm levels, °C)
-const TEMP_WARN = 60;
-const TEMP_CRIT = 75;
-const tempState = (c) => (c >= TEMP_CRIT ? 'crit' : c >= TEMP_WARN ? 'warn' : 'ok');
 
 const AI_HEADINGS = ['Status', 'What looks normal', 'What is drifting', 'Failure outlook', 'What to do'];
 
@@ -312,15 +315,13 @@ function LiveView({ P, onStatus, children }) {
   const s = data?.summary;
   const last = readings[readings.length - 1];
   const ageSec = last ? (now - Date.parse(last.at)) / 1000 : null;
-  // ThingSpeak's free plan takes at most one update per 15 s and Wokwi can run slow,
-  // so allow 3 minutes (or 5 sending intervals) before calling the device offline
   const interval = s?.medianIntervalSec ?? 20;
-  const offlineAfter = Math.max(180, interval * 5);
+  const offlineAfter = runGapSec(s?.medianIntervalSec ?? null);
   const online = ageSec !== null && ageSec < offlineAfter;
   const waiting = online && ageSec > interval * 2 + 15;
   const tariff = getTariffByHour(ammanHourNow());
   const penalty = last?.pf != null ? getPowerFactorSurchargePct(last.pf) : 0;
-  const costPerHour = last?.power != null ? (last.power / 1000) * (tariff.rate / 1000) * (1 + penalty / 100) : null;
+  const costPerHour = last?.power != null ? hourlyCostJd(last.power / 1000, tariff.rate, penalty) : null;
   // trend as % of the latest running current (the slope already ignores stopped readings)
   const currentTrend = s?.current.slopePerHour != null && s.current.last ? (s.current.slopePerHour / s.current.last) * 100 : null;
 
@@ -351,7 +352,7 @@ function LiveView({ P, onStatus, children }) {
     if (last.pf !== null) {
       out.push({
         key: 'pf',
-        state: penalty >= 6.5 ? 'crit' : penalty > 0 ? 'warn' : 'ok',
+        state: surchargeTone(penalty),
         name: 'Power factor',
         detail: penalty > 0 ? `${last.pf.toFixed(2)}, +${penalty}% EMRC surcharge` : `${last.pf.toFixed(2)}, no surcharge`,
       });
@@ -366,13 +367,13 @@ function LiveView({ P, onStatus, children }) {
     }
     if (lastTemp) {
       const t = lastTemp.temperature;
-      const state = tempState(t);
+      const state = motorTempTone(t);
       const rising = tempTrend !== null && tempTrend >= 5;
       out.push({
         key: 'temp',
         state: state === 'ok' && rising ? 'warn' : state,
         name: tempSim ? 'Motor temperature (simulated)' : 'Motor temperature',
-        detail: `${t.toFixed(1)} °C${state === 'crit' ? `, over the ${TEMP_CRIT} °C alarm` : state === 'warn' ? `, over ${TEMP_WARN} °C` : ''}${rising ? `, rising ${tempTrend.toFixed(0)} °C an hour` : ''}`,
+        detail: `${t.toFixed(1)} °C${state === 'crit' ? `, over the ${MOTOR_TEMP_ALARM_C} °C alarm` : state === 'warn' ? `, over ${MOTOR_TEMP_WARN_C} °C` : ''}${rising ? `, rising ${tempTrend.toFixed(0)} °C an hour` : ''}`,
       });
     }
     if (s?.restarts) {
@@ -427,7 +428,7 @@ function LiveView({ P, onStatus, children }) {
   };
 
   // a pause longer than this splits the readings into separate runs
-  const gapMs = Math.max(120, (s?.medianIntervalSec ?? 20) * 5) * 1000;
+  const gapMs = runGapSec(s?.medianIntervalSec ?? null) * 1000;
 
   // the latest run: everything since the last long pause (a fresh Wokwi session)
   const lastRun = useMemo(() => {
@@ -507,7 +508,7 @@ function LiveView({ P, onStatus, children }) {
         <Card i={1} className="flex flex-col p-5 sm:col-span-2 xl:row-span-2">
           <div className="kpi__label">
             {online ? 'Power now' : 'Last power reading'}
-            <span className={`badge ${tariff.band === 'Peak' ? 'crit' : tariff.band === 'Off-Peak' ? 'ok' : 'warn'}`}>
+            <span className={`badge ${BAND_TONE[tariff.band]}`}>
               {tariff.band}
             </span>
           </div>
@@ -578,7 +579,7 @@ function LiveView({ P, onStatus, children }) {
           decimals={2}
           label="Power factor"
           sub="Surcharge-free from 0.90"
-          badge={penalty > 0 ? { text: `+${penalty}%`, tone: penalty >= 6.5 ? 'crit' : 'warn' } : undefined}
+          badge={penalty > 0 ? { text: `+${penalty}%`, tone: surchargeTone(penalty) } : undefined}
         />
         <Kpi
           i={5}
@@ -594,7 +595,7 @@ function LiveView({ P, onStatus, children }) {
             <div className="kpi__label">
               {tempSim ? 'Motor temperature (simulated)' : 'Motor temperature'}
               {lastTemp && (
-                <span className={`badge ${STATUS[tempState(lastTemp.temperature)].tone}`}>{STATUS[tempState(lastTemp.temperature)].label}</span>
+                <span className={`badge ${STATUS[motorTempTone(lastTemp.temperature)].tone}`}>{STATUS[motorTempTone(lastTemp.temperature)].label}</span>
               )}
             </div>
             <div className="kpi__value">
@@ -603,7 +604,7 @@ function LiveView({ P, onStatus, children }) {
             </div>
             <div className="kpi__sub">
               {lastTemp
-                ? `${tempSim ? 'Estimated from current until a sensor reports. ' : ''}Warning at ${TEMP_WARN} °C, alarm at ${TEMP_CRIT} °C${tempTrend !== null ? `. ${tempTrend >= 0 ? '+' : ''}${tempTrend.toFixed(1)} °C an hour` : ''}`
+                ? `${tempSim ? 'Estimated from current until a sensor reports. ' : ''}Warning at ${MOTOR_TEMP_WARN_C} °C, alarm at ${MOTOR_TEMP_ALARM_C} °C${tempTrend !== null ? `. ${tempTrend >= 0 ? '+' : ''}${tempTrend.toFixed(1)} °C an hour` : ''}`
                 : 'No temperature yet. Wire the NTC sensor in Wokwi and enable field 6 in ThingSpeak.'}
             </div>
           </div>
@@ -619,9 +620,9 @@ function LiveView({ P, onStatus, children }) {
                       </linearGradient>
                     </defs>
                     <XAxis dataKey="t" type="number" domain={['dataMin - 60000', 'dataMax + 60000']} hide />
-                    <YAxis hide domain={[(d) => Math.min(d - 5, 20), (d) => Math.max(d + 5, TEMP_CRIT + 5)]} />
-                    <ReferenceLine y={TEMP_WARN} stroke="var(--warn)" strokeDasharray="4 4" label={{ value: `${TEMP_WARN} °C`, position: 'insideTopRight', fill: 'var(--warn)', fontSize: 11 }} />
-                    <ReferenceLine y={TEMP_CRIT} stroke={P.crit} strokeDasharray="4 4" label={{ value: `${TEMP_CRIT} °C`, position: 'insideTopRight', fill: P.crit, fontSize: 11 }} />
+                    <YAxis hide domain={[(d) => Math.min(d - 5, 20), (d) => Math.max(d + 5, MOTOR_TEMP_ALARM_C + 5)]} />
+                    <ReferenceLine y={MOTOR_TEMP_WARN_C} stroke="var(--warn)" strokeDasharray="4 4" label={{ value: `${MOTOR_TEMP_WARN_C} °C`, position: 'insideTopRight', fill: 'var(--warn)', fontSize: 11 }} />
+                    <ReferenceLine y={MOTOR_TEMP_ALARM_C} stroke={P.crit} strokeDasharray="4 4" label={{ value: `${MOTOR_TEMP_ALARM_C} °C`, position: 'insideTopRight', fill: P.crit, fontSize: 11 }} />
                     <Area type="monotone" dataKey="v" stroke={P.line} strokeWidth={1.75} fill="url(#tempFill)" connectNulls={false} dot={soloDot(P.line)} activeDot={false} isAnimationActive={false} />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -817,7 +818,7 @@ export default function App() {
       Array.from({ length: 24 }, (_, h) => {
         const load = loadAt(h, peakShiftPct);
         const t = getTariffByHour(h);
-        const cost = Number((((load * t.rate) / 1000) * (1 + pfPenaltyPct / 100)).toFixed(2));
+        const cost = Number(hourlyCostJd(load, t.rate, pfPenaltyPct).toFixed(2));
         return { h, label: `${h.toString().padStart(2, '0')}`, load, cost, band: t.band };
       }),
     [peakShiftPct, pfPenaltyPct]
@@ -831,8 +832,9 @@ export default function App() {
   const checks = useMemo(() => {
     // zone C is "not fit for long-term running", so it can't be shown as nominal
     const pump = anomalyInjected || pumpHealth < 40 || isoZone === 'D' ? 'crit' : pumpHealth < 70 || isoZone === 'C' ? 'warn' : 'ok';
-    const pf = pfPenaltyPct >= 6.5 ? 'crit' : pfPenaltyPct > 0 ? 'warn' : 'ok';
-    const tariff = currentTariff.band === 'Peak' ? 'warn' : 'ok';
+    const pf = surchargeTone(pfPenaltyPct);
+    // severity, not price colour: a peak-rate period is worth acting on but is not a fault
+    const tariff = BAND_TONE[currentTariff.band] === 'crit' ? 'warn' : 'ok';
     return [
       {
         key: 'pump',
@@ -869,8 +871,6 @@ export default function App() {
 
   // the ring takes the same colour as the pump's status badge
   const pumpColor = STATUS[checks[0].state].color;
-  const pfTone = pfPenaltyPct === 0 ? 'ok' : pfPenaltyPct >= 6.5 ? 'crit' : 'warn';
-  const bandTone = currentTariff.band === 'Peak' ? 'crit' : currentTariff.band === 'Off-Peak' ? 'ok' : 'warn';
   const nowHour = Math.floor(timeOfDay);
   const overallMeta = STATUS[overall];
   // the bell and the Diagnostics badge count live device issues plus the simulated plant's
@@ -1133,7 +1133,7 @@ export default function App() {
                 unit="kW"
                 label="Plant load"
                 sub="Right now"
-                badge={{ text: currentTariff.band, tone: bandTone }}
+                badge={{ text: currentTariff.band, tone: BAND_TONE[currentTariff.band] }}
               />
               <Kpi
                 i={5}
@@ -1142,7 +1142,7 @@ export default function App() {
                 decimals={2}
                 label="Power factor"
                 sub="Surcharge-free from 0.90"
-                badge={pfPenaltyPct > 0 ? { text: `+${pfPenaltyPct}%`, tone: pfTone } : undefined}
+                badge={pfPenaltyPct > 0 ? { text: `+${pfPenaltyPct}%`, tone: surchargeTone(pfPenaltyPct) } : undefined}
               />
               <Kpi i={6} icon={Timer} value={countdown.countdownText} label="Until the rate changes" sub={`${countdown.targetBand} at ${countdown.targetTime}`} />
             </div>

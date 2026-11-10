@@ -3,6 +3,8 @@
 // Server-only: reads the key from the environment, never ships it to the browser.
 // ============================================================================
 
+import { runGapSec } from './calculations.ts'; // explicit extension so node --test can load it
+
 export interface Reading {
   at: string; // ISO 8601 UTC
   entry: number;
@@ -91,27 +93,38 @@ export async function fetchReadings(
   return { channel, readings, temperatureSimulated };
 }
 
+// Running = reporting "running" (or no status field) and drawing current
+const isRunning = (r: Reading): boolean => (r.status === null || r.status === 1) && (r.current ?? 0) > 0;
+
+// Middle value of the pauses between readings, in seconds
+function medianIntervalSec(readings: Reading[]): number | null {
+  const times = readings.map((r) => Date.parse(r.at));
+  const gaps = times
+    .slice(1)
+    .map((t, i) => (t - times[i]) / 1000)
+    .sort((a, b) => a - b);
+  return gaps.length ? gaps[Math.floor(gaps.length / 2)] : null;
+}
+
 // shortcut: motor temperature estimated from current (first-order heating model), used only
 // while field 6 has no data; real sensor readings replace it automatically.
-const AMBIENT_C = 30;
-const RISE_AT_FULL_LOAD_C = 22; // steady-state rise at FULL_LOAD_A
-const FULL_LOAD_A = 0.7;
+export const SIM_TEMP = { ambientC: 30, riseAtFullLoadC: 22, fullLoadA: 0.7 }; // rise reached at fullLoadA
 const THERMAL_TAU_MIN = 8;
-const GAP_MIN = 5; // a longer pause means the device (and motor) were off
 
 export function simulateTemperature(readings: Reading[]): void {
-  let t = AMBIENT_C;
+  const { ambientC, riseAtFullLoadC, fullLoadA } = SIM_TEMP;
+  const gapMin = runGapSec(medianIntervalSec(readings)) / 60; // a longer pause: device and motor were off
+  let t = ambientC;
   let prevAt: number | null = null;
   for (const r of readings) {
     const at = Date.parse(r.at);
     const dtMin = prevAt === null ? 0 : (at - prevAt) / 60000;
     prevAt = at;
-    if (dtMin > GAP_MIN) {
-      t = AMBIENT_C + (t - AMBIENT_C) * Math.exp(-dtMin / THERMAL_TAU_MIN); // cooled while off
+    if (dtMin > gapMin) {
+      t = ambientC + (t - ambientC) * Math.exp(-dtMin / THERMAL_TAU_MIN); // cooled while off
     } else {
-      const running = (r.current ?? 0) > 0 && (r.status === null || r.status === 1);
-      const load = running ? Math.min((r.current ?? 0) / FULL_LOAD_A, 1.5) : 0;
-      const target = AMBIENT_C + RISE_AT_FULL_LOAD_C * load * load; // copper losses grow with I²
+      const load = isRunning(r) ? Math.min((r.current ?? 0) / fullLoadA, 1.5) : 0;
+      const target = ambientC + riseAtFullLoadC * load * load; // copper losses grow with I²
       t = target + (t - target) * Math.exp(-dtMin / THERMAL_TAU_MIN);
     }
     r.temperature = Number(t.toFixed(1));
@@ -154,7 +167,7 @@ function stats(readings: Reading[], key: 'voltage' | 'current' | 'power' | 'pf' 
   // The trend only uses readings taken while the machine was running and drawing
   // current; otherwise stops and start-up ramps look like drift.
   const running = readings
-    .filter((r) => (r.status === null || r.status === 1) && (r.current ?? 0) > 0)
+    .filter(isRunning)
     .map((r) => ({ t: Date.parse(r.at) / 3_600_000, v: r[key] }))
     .filter((p): p is { t: number; v: number } => p.v !== null);
   let slope: number | null = null;
@@ -176,11 +189,6 @@ function stats(readings: Reading[], key: 'voltage' | 'current' | 'power' | 'pf' 
 }
 
 export function summarise(readings: Reading[]): Summary {
-  const times = readings.map((r) => Date.parse(r.at));
-  const gaps = times
-    .slice(1)
-    .map((t, i) => (t - times[i]) / 1000)
-    .sort((a, b) => a - b);
   let restarts = 0;
   for (let i = 1; i < readings.length; i++) {
     const a = readings[i - 1].energy;
@@ -191,7 +199,7 @@ export function summarise(readings: Reading[]): Summary {
     count: readings.length,
     firstAt: readings[0]?.at ?? null,
     lastAt: readings[readings.length - 1]?.at ?? null,
-    medianIntervalSec: gaps.length ? gaps[Math.floor(gaps.length / 2)] : null,
+    medianIntervalSec: medianIntervalSec(readings),
     restarts,
     stoppedReadings: readings.filter((r) => r.status !== null && r.status !== 1).length,
     voltage: stats(readings, 'voltage'),
