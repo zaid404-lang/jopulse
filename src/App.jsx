@@ -1,208 +1,802 @@
 'use client';
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { motion } from 'framer-motion';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { flushSync } from 'react-dom';
+import { motion, animate } from 'framer-motion';
 import {
-  ArrowUpRight,
-  ArrowDownRight,
-  LayoutDashboard,
   Activity,
+  LayoutDashboard,
   LineChart,
-  Settings,
-  Search,
   Bell,
-  Clock,
   Zap,
-  DollarSign,
-  Heart,
   Gauge,
-  Sliders,
-  Sparkles,
-  Terminal,
-  RotateCcw,
-  Flame,
-  ChevronRight,
-  TrendingUp,
-  TrendingDown,
-  Cpu,
-  Layers,
+  Stethoscope,
+  Waves,
+  Timer,
   ShieldCheck,
-  AlertTriangle
+  Play,
+  Pause,
+  Sun,
+  Moon,
+  Plug,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  BatteryCharging,
 } from 'lucide-react';
 import {
   AreaChart,
   Area,
+  BarChart,
+  Bar,
+  Cell,
   XAxis,
   YAxis,
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
-  ReferenceDot
+  ReferenceDot,
+  CartesianGrid,
 } from 'recharts';
+import {
+  BANDS,
+  getTariffByHour,
+  getCountdown,
+  getPowerFactorSurchargePct,
+  loadAt,
+  computeFinancials,
+} from './lib/calculations';
 
 // ---------------------------------------------------------------------------
-// CRITICAL INSTRUCTION - THE BASE COMPONENT (EXTRACTED FROM REFERENCE VIDEO)
+// Chart colours per theme (SVG attributes can't read CSS variables)
 // ---------------------------------------------------------------------------
-const StatCard = ({ title, value, change, icon: Icon, gradient, isPositive = true }) => {
-  return (
-    <motion.div
-      whileHover={{ y: -5 }}
-      className="bg-white/[0.03] backdrop-blur-xl border border-white/10 p-6 rounded-2xl relative overflow-hidden shadow-[0_8px_32px_0_rgba(0,0,0,0.3)]"
-    >
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-sm text-white/60">{title}</p>
-          <h2 className="text-3xl font-bold text-white mt-1 font-mono tracking-tight">{value}</h2>
-          <p className={`flex items-center gap-1 text-sm mt-2 ${isPositive ? 'text-emerald-400' : 'text-amber-400'}`}>
-            <ArrowUpRight size={16} /> {change}
-          </p>
-        </div>
-        <div className={`p-3 rounded-xl bg-gradient-to-br ${gradient} bg-opacity-20 shadow-lg`}>
-          <Icon className="text-white" size={24} />
-        </div>
-      </div>
-    </motion.div>
-  );
+const PALETTE = {
+  // ink for data, safety orange only for "now"; mirrors the tokens in globals.css
+  light: { tick: 'rgba(60,60,67,.55)', bar: 'rgba(118,118,128,.22)', barNow: '#007aff', line: '#007aff', crit: '#ff3b30', cursor: 'rgba(118,118,128,.08)', ring: 'rgba(118,118,128,.14)' },
+  dark: { tick: 'rgba(235,235,245,.5)', bar: 'rgba(118,118,128,.36)', barNow: '#0a84ff', line: '#0a84ff', crit: '#ff453a', cursor: 'rgba(118,118,128,.16)', ring: 'rgba(118,118,128,.28)' },
+};
+
+const STATUS = {
+  ok: { color: 'var(--ok)', label: 'Nominal', tone: 'ok' },
+  warn: { color: 'var(--warn)', label: 'Attention', tone: 'warn' },
+  crit: { color: 'var(--crit)', label: 'Critical', tone: 'crit' },
 };
 
 // ---------------------------------------------------------------------------
-// EMRC Tariff Schedule Definitions (Zarqa Medium-Industry)
+// Tariff and billing rules live in lib/calculations; only their colours are UI
 // ---------------------------------------------------------------------------
-const TARIFF_SEGMENTS = [
-  { start: 0, end: 5, band: 'Partial-Peak', rate: 69, color: '#f59e0b', label: '00:00 – 05:00' },
-  { start: 5, end: 14, band: 'Off-Peak', rate: 59, color: '#10b981', label: '05:00 – 14:00' },
-  { start: 14, end: 17, band: 'Partial-Peak', rate: 69, color: '#f59e0b', label: '14:00 – 17:00' },
-  { start: 17, end: 23, band: 'Peak', rate: 79, color: '#ef4444', label: '17:00 – 23:00' },
-  { start: 23, end: 24, band: 'Partial-Peak', rate: 69, color: '#f59e0b', label: '23:00 – 24:00' }
-];
-
-function getTariffByHour(hour) {
-  const h = (hour + 24) % 24;
-  for (const s of TARIFF_SEGMENTS) {
-    if (h >= s.start && h < s.end) return s;
-  }
-  return TARIFF_SEGMENTS[0];
-}
-
-function getCountdown(currentHour) {
-  const norm = (currentHour + 24) % 24;
-  let targetHour = 5;
-  let targetBand = 'Off-Peak (59 fils)';
-
-  if (norm < 5) {
-    targetHour = 5;
-    targetBand = 'Off-Peak (59 fils)';
-  } else if (norm < 14) {
-    targetHour = 14;
-    targetBand = 'Partial-Peak (69 fils)';
-  } else if (norm < 17) {
-    targetHour = 17;
-    targetBand = 'Peak (79 fils)';
-  } else if (norm < 23) {
-    targetHour = 23;
-    targetBand = 'Partial-Peak (69 fils)';
-  } else {
-    targetHour = 29;
-    targetBand = 'Off-Peak (59 fils)';
-  }
-
-  const diff = (targetHour - norm) % 24;
-  const mins = Math.max(1, Math.round(diff * 60));
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return {
-    countdownText: `${h}h ${m.toString().padStart(2, '0')}m`,
-    targetBand,
-    targetTime: `${(targetHour % 24).toString().padStart(2, '0')}:00`
-  };
-}
+const BAND_COLOR = { 'Off-Peak': '#34c759', 'Partial-Peak': '#ff9500', Peak: '#ff3b30' };
 
 // ---------------------------------------------------------------------------
-// Vibration Frequency Domain Data Generator (0 - 1000 Hz)
+// Vibration frequency-domain generator (0 – 1000 Hz)
 // ---------------------------------------------------------------------------
 function generateVibrationData(bearingWear, isAnomaly) {
   const points = [];
   const wear = bearingWear / 100;
-  
   for (let f = 0; f <= 1000; f += 10) {
     let amp = 0.18 + Math.sin(f * 0.03) * 0.05;
-    
-    // 1X Fundamental running speed (29.5 Hz)
-    if (Math.abs(f - 30) <= 10) {
-      amp += 1.85 + wear * 0.3;
-    }
-    // 2X Misalignment Harmonic (59.0 Hz)
-    if (Math.abs(f - 60) <= 10) {
-      amp += isAnomaly ? 6.2 : (0.8 + wear * 0.85);
-    }
-    // BPFO Bearing Defect (148 Hz)
-    if (Math.abs(f - 150) <= 10) {
-      amp += (isAnomaly ? 3.9 : 1.7) * wear;
-    }
-    // High-frequency friction harmonics during stress
+    if (Math.abs(f - 30) <= 10) amp += 1.85 + wear * 0.3; // 1X
+    if (Math.abs(f - 60) <= 10) amp += isAnomaly ? 6.2 : 0.8 + wear * 0.85; // 2X
+    if (Math.abs(f - 150) <= 10) amp += (isAnomaly ? 3.9 : 1.7) * wear; // BPFO
     if (f >= 420 && f <= 460 && isAnomaly) amp += 1.8;
     if (f >= 780 && f <= 820 && isAnomaly) amp += 1.4;
-
-    points.push({
-      freq: f,
-      amp: Number(amp.toFixed(3)),
-      isoLimit: 3.5
-    });
+    points.push({ freq: f, amp: Number(amp.toFixed(3)) });
   }
   return points;
 }
 
 // ---------------------------------------------------------------------------
-// Main Application Component
+// Building blocks
+// ---------------------------------------------------------------------------
+
+// A solid content card. Glass is kept for the floating chrome (Liquid Glass:
+// content sits on solid surfaces, controls float on glass).
+function Card({ i = 0, id, className = '', alarm = false, children }) {
+  return (
+    <div
+      id={id}
+      className={`card ${alarm ? 'alarm' : ''} ${className}`}
+      style={{ '--d': `${i * 40}ms` }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function CardHead({ title, sub, right }) {
+  return (
+    <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+      <div className="min-w-0">
+        <h3 className="text-[15px] font-semibold text-[var(--ink)]">{title}</h3>
+        {sub && <p className="mt-0.5 text-xs text-[var(--ink-3)]">{sub}</p>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+// Smoothly counts from the previous value to the new one
+function Num({ value, decimals = 0 }) {
+  const [shown, setShown] = useState(value);
+  const prev = useRef(value);
+  useEffect(() => {
+    const controls = animate(prev.current, value, {
+      duration: 0.45,
+      ease: [0.2, 0.8, 0.2, 1],
+      onUpdate: (v) => setShown(v),
+    });
+    prev.current = value;
+    return () => controls.stop();
+  }, [value]);
+  return shown.toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+}
+
+// One instrument reading: label on top like a meter's nameplate, then the figure
+function Kpi({ i, value, decimals = 0, unit, label, sub, badge }) {
+  return (
+    <Card i={i} className="kpi">
+      <div className="kpi__label">
+        {label}
+        {badge && <span className={`badge ${badge.tone}`}>{badge.text}</span>}
+      </div>
+      <div className="kpi__value">
+        {typeof value === 'number' ? <Num value={value} decimals={decimals} /> : value}
+        {unit && <span className="kpi__unit">{unit}</span>}
+      </div>
+      <div className="kpi__sub">{sub}</div>
+    </Card>
+  );
+}
+
+function Ring({ value, color, track }) {
+  const r = 52;
+  const circ = 2 * Math.PI * r;
+  return (
+    <div className="relative mx-auto h-[140px] w-[140px]">
+      <svg viewBox="0 0 140 140" className="h-full w-full -rotate-90">
+        <circle cx="70" cy="70" r={r} fill="none" stroke={track} strokeWidth="14" />
+        <circle
+          cx="70"
+          cy="70"
+          r={r}
+          fill="none"
+          stroke={color}
+          strokeWidth="14"
+          strokeLinecap="butt"
+          strokeDasharray={circ}
+          strokeDashoffset={circ - (value / 100) * circ}
+          style={{ transition: 'stroke-dashoffset .6s ease, stroke .4s ease' }}
+        />
+      </svg>
+      <div className="absolute inset-0 grid place-items-center text-center">
+        <div>
+          <div className="num text-[30px] font-bold leading-none text-[var(--ink)]">
+            <Num value={value} />%
+          </div>
+          <div className="mt-1 text-[11px] text-[var(--ink-3)]">health</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Each menu item scrolls to a section; the section in view lights up its item
+const NAV_GROUPS = [
+  {
+    title: 'Machine',
+    items: [
+      { name: 'Overview', icon: LayoutDashboard, target: 'sec-top' },
+      { name: 'Readings', icon: Plug, target: 'sec-live' },
+    ],
+  },
+  {
+    title: 'Plant',
+    items: [
+      { name: 'Energy use', icon: LineChart, target: 'sec-energy' },
+      { name: 'Vibration', icon: Waves, target: 'sec-vibration' },
+    ],
+  },
+  {
+    title: 'Act',
+    items: [{ name: 'Diagnostics', icon: Stethoscope, target: 'sec-ai', alerts: true }],
+  },
+];
+const NAV_ITEMS = NAV_GROUPS.flatMap((g) => g.items);
+
+function readStored(key, allowed, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return allowed.includes(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+const readStoredTheme = () => readStored('plant-pulse-theme', ['light', 'dark'], 'light');
+
+// ---------------------------------------------------------------------------
+// Live view helpers
+// ---------------------------------------------------------------------------
+const AMMAN = 'Asia/Amman';
+
+function ammanHourNow() {
+  const parts = new Intl.DateTimeFormat('en-GB', { hour: 'numeric', minute: 'numeric', hourCycle: 'h23', timeZone: AMMAN }).formatToParts(new Date());
+  const h = Number(parts.find((p) => p.type === 'hour')?.value ?? 0);
+  const m = Number(parts.find((p) => p.type === 'minute')?.value ?? 0);
+  return h + m / 60;
+}
+
+const fmtClock = (ms) => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: AMMAN });
+const fmtStamp = (iso) =>
+  new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: AMMAN });
+
+function fmtAgo(sec) {
+  if (sec < 60) return `${Math.max(0, Math.round(sec))} s`;
+  if (sec < 3600) return `${Math.round(sec / 60)} min`;
+  if (sec < 86400) return `${Math.round(sec / 3600)} h`;
+  return `${Math.round(sec / 86400)} d`;
+}
+
+// Chart points with a break (null) wherever the device paused longer than gapMs.
+// A reading with no neighbour on either side is flagged `solo`, because an area
+// chart can't draw a line through a single point.
+function buildSeries(rows, key, gapMs) {
+  const out = [];
+  rows.forEach((r, i) => {
+    const t = Date.parse(r.at);
+    if (i && t - Date.parse(rows[i - 1].at) > gapMs) out.push({ t: t - 1, v: null });
+    out.push({ t, v: r[key] });
+  });
+  return out.map((p, i) => ({
+    ...p,
+    solo: p.v !== null && (out[i - 1]?.v ?? null) === null && (out[i + 1]?.v ?? null) === null,
+  }));
+}
+
+// Recharts dot renderer that only draws lone readings
+const soloDot = (color) =>
+  function SoloDot({ cx, cy, payload, index }) {
+    if (!payload?.solo || cx == null || cy == null) return <g key={`d${index}`} />;
+    return <circle key={`d${index}`} cx={cx} cy={cy} r={4.5} fill={color} stroke="var(--shell)" strokeWidth={2} />;
+  };
+
+// Motor temperature limits (plant alarm levels, °C)
+const TEMP_WARN = 60;
+const TEMP_CRIT = 75;
+const tempState = (c) => (c >= TEMP_CRIT ? 'crit' : c >= TEMP_WARN ? 'warn' : 'ok');
+
+const AI_HEADINGS = ['Status', 'What looks normal', 'What is drifting', 'Failure outlook', 'What to do'];
+
+// Real readings from the ThingSpeak channel, plus an AI model's analysis of them
+// The live ThingSpeak cards and AI diagnostics, with the rest of the dashboard
+// passed in as children so the whole page is one dashboard.
+function LiveView({ P, onStatus, children }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  const [aiText, setAiText] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState(null);
+  const [aiAt, setAiAt] = useState(null);
+  const [aiModel, setAiModel] = useState(null);
+  const aiRef = useRef(null);
+
+  // the spinner is switched on by the Refresh button; background polls stay quiet
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch('/api/thingspeak?results=240', { cache: 'no-store' });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+      setData(body);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const first = setTimeout(load, 0);
+    const poll = setInterval(load, 15000);
+    const tick = setInterval(() => setNow(Date.now()), 5000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(poll);
+      clearInterval(tick);
+    };
+  }, [load]);
+
+  const readings = useMemo(() => data?.readings ?? [], [data]);
+  const s = data?.summary;
+  const last = readings[readings.length - 1];
+  const ageSec = last ? (now - Date.parse(last.at)) / 1000 : null;
+  // ThingSpeak's free plan takes at most one update per 15 s and Wokwi can run slow,
+  // so allow 3 minutes (or 5 sending intervals) before calling the device offline
+  const interval = s?.medianIntervalSec ?? 20;
+  const offlineAfter = Math.max(180, interval * 5);
+  const online = ageSec !== null && ageSec < offlineAfter;
+  const waiting = online && ageSec > interval * 2 + 15;
+  const tariff = getTariffByHour(ammanHourNow());
+  const penalty = last?.pf != null ? getPowerFactorSurchargePct(last.pf) : 0;
+  const costPerHour = last?.power != null ? (last.power / 1000) * (tariff.rate / 1000) * (1 + penalty / 100) : null;
+  // trend as % of the latest running current (the slope already ignores stopped readings)
+  const currentTrend = s?.current.slopePerHour != null && s.current.last ? (s.current.slopePerHour / s.current.last) * 100 : null;
+
+  const lastTemp = readings.findLast((r) => r.temperature !== null) ?? null;
+  const tempTrend = s?.temperature?.slopePerHour ?? null; // °C per hour while running
+  const tempSim = !!data?.temperatureSimulated; // no sensor yet: estimated from current
+
+  // Rule-based checks that run on every refresh (the AI goes deeper on demand)
+  const issues = useMemo(() => {
+    if (!last) return [];
+    const out = [];
+    out.push(
+      online
+        ? { key: 'link', state: 'ok', name: 'Data link', detail: `Last reading ${fmtAgo(ageSec)} ago` }
+        : { key: 'link', state: 'crit', name: 'Data link', detail: `No reading for ${fmtAgo(ageSec)}, last at ${fmtStamp(last.at)}` }
+    );
+    if (last.status !== null) {
+      out.push(
+        last.status === 1
+          ? { key: 'run', state: 'ok', name: 'Machine', detail: 'Reports running' }
+          : { key: 'run', state: 'crit', name: 'Machine', detail: `Reports status ${last.status} (not running)` }
+      );
+    }
+    if (last.voltage !== null) {
+      const bad = last.voltage < 207 || last.voltage > 253;
+      out.push({ key: 'v', state: bad ? 'crit' : 'ok', name: 'Supply voltage', detail: `${last.voltage} V${bad ? ', outside 207–253 V' : ', within ±10%'}` });
+    }
+    if (last.pf !== null) {
+      out.push({
+        key: 'pf',
+        state: penalty >= 6.5 ? 'crit' : penalty > 0 ? 'warn' : 'ok',
+        name: 'Power factor',
+        detail: penalty > 0 ? `${last.pf.toFixed(2)}, +${penalty}% EMRC surcharge` : `${last.pf.toFixed(2)}, no surcharge`,
+      });
+    }
+    if (currentTrend !== null && Math.abs(currentTrend) >= 10) {
+      out.push({
+        key: 'trend',
+        state: 'warn',
+        name: 'Current trend',
+        detail: `${currentTrend > 0 ? 'Rising' : 'Falling'} about ${Math.abs(currentTrend).toFixed(0)}% per hour`,
+      });
+    }
+    if (lastTemp) {
+      const t = lastTemp.temperature;
+      const state = tempState(t);
+      const rising = tempTrend !== null && tempTrend >= 5;
+      out.push({
+        key: 'temp',
+        state: state === 'ok' && rising ? 'warn' : state,
+        name: tempSim ? 'Motor temperature (simulated)' : 'Motor temperature',
+        detail: `${t.toFixed(1)} °C${state === 'crit' ? `, over the ${TEMP_CRIT} °C alarm` : state === 'warn' ? `, over ${TEMP_WARN} °C` : ''}${rising ? `, rising ${tempTrend.toFixed(0)} °C an hour` : ''}`,
+      });
+    }
+    if (s?.restarts) {
+      out.push({ key: 'restart', state: 'warn', name: 'Restarts', detail: `Energy counter reset ${s.restarts}× in this window` });
+    }
+    return out;
+  }, [last, online, ageSec, penalty, currentTrend, s, lastTemp, tempTrend, tempSim]);
+
+  const issueCount = issues.filter((i) => i.state !== 'ok').length;
+  const overall = issues.some((i) => i.state === 'crit') ? 'crit' : issueCount ? 'warn' : 'ok';
+
+  useEffect(() => {
+    onStatus({
+      issueCount,
+      overall,
+      online,
+      ago: ageSec !== null ? fmtAgo(ageSec) : null,
+      channel: data?.channel ? `${data.channel.name}, channel ${data.channel.id}` : null,
+      issues: issues.filter((i) => i.state !== 'ok'),
+    });
+  }, [issueCount, overall, online, ageSec, data, onStatus, issues]);
+
+  const runAi = async () => {
+    setAiBusy(true);
+    setAiError(null);
+    setAiText('');
+    try {
+      const res = await fetch('/api/diagnose', { method: 'POST' });
+      if (!res.ok || !res.body) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `HTTP ${res.status}`);
+      }
+      setAiModel(res.headers.get('X-Model'));
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let full = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        full += chunk;
+        setAiText((t) => t + chunk);
+        if (aiRef.current) aiRef.current.scrollTop = aiRef.current.scrollHeight;
+      }
+      // only stamp a successful analysis; errors arrive as an "[error]" line
+      if (!full.includes('[error]')) setAiAt(Date.now());
+    } catch (e) {
+      setAiError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  // a pause longer than this splits the readings into separate runs
+  const gapMs = Math.max(120, (s?.medianIntervalSec ?? 20) * 5) * 1000;
+
+  // the latest run: everything since the last long pause (a fresh Wokwi session)
+  const lastRun = useMemo(() => {
+    let start = 0;
+    for (let i = 1; i < readings.length; i++) {
+      if (Date.parse(readings[i].at) - Date.parse(readings[i - 1].at) > gapMs) start = i;
+    }
+    return readings.slice(start);
+  }, [readings, gapMs]);
+
+  // the hero card shows power for the latest run
+  const chartPower = useMemo(() => buildSeries(lastRun, 'power', gapMs), [lastRun, gapMs]);
+  const chartTemp = useMemo(() => buildSeries(lastRun, 'temperature', gapMs), [lastRun, gapMs]);
+
+  // without live readings, show why in place of the live cards; the rest of the dashboard still renders
+  if (!data && !error) {
+    return (
+      <>
+        <div id="sec-live" className="mt-5 grid scroll-mt-6 place-items-center py-12 text-[13px] text-[var(--ink-3)]">
+          Reading the ThingSpeak channel…
+        </div>
+        {children}
+      </>
+    );
+  }
+
+  if (!data && error) {
+    return (
+      <>
+        <Card i={1} alarm id="sec-live" className="mt-5 scroll-mt-6 p-6">
+          <CardHead title="Can't reach ThingSpeak" sub={error} right={<button onClick={load} className="btn-solid !min-h-[34px] !text-[12px]">Try again</button>} />
+        </Card>
+        {children}
+      </>
+    );
+  }
+
+  if (!readings.length) {
+    return (
+      <>
+        <Card i={1} id="sec-live" className="mt-5 scroll-mt-6 p-6">
+          <CardHead title="No readings yet" sub="Start the Wokwi simulation; readings appear here within a few seconds." />
+        </Card>
+        {children}
+      </>
+    );
+  }
+
+  return (
+    <>
+      {/* Device strip */}
+      <div className="mt-5 flex flex-wrap items-center gap-2 text-[12px]">
+        <span className={`badge ${!online ? 'crit' : waiting ? 'warn' : 'ok'}`}>
+          {online ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
+          {!online ? 'Offline' : waiting ? 'Waiting for next reading' : 'Online'}
+        </span>
+        <span className="text-[var(--ink-3)]">
+          Last reading <span className="num">{fmtStamp(last.at)}</span> · <span className="num">{fmtAgo(ageSec)}</span> ago ·{' '}
+          <span className="num">{s.count}</span> readings, one every <span className="num">{s.medianIntervalSec ?? '–'}</span> s
+        </span>
+        <button
+          onClick={() => {
+            setRefreshing(true);
+            load();
+          }}
+          className="btn-ghost ml-auto !min-h-[32px] !px-3 !text-[12px]"
+          aria-label="Refresh readings"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+      {error && <p className="mt-2 text-[12px] text-[var(--crit)]">Last refresh failed: {error}. Showing the previous readings.</p>}
+
+      {/* Latest readings: power is the one big number, the rest support it */}
+      <div id="sec-live" className="mt-3 grid scroll-mt-6 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <Card i={1} className="flex flex-col p-5 sm:col-span-2 xl:row-span-2">
+          <div className="kpi__label">
+            {online ? 'Power now' : 'Last power reading'}
+            <span className={`badge ${tariff.band === 'Peak' ? 'crit' : tariff.band === 'Off-Peak' ? 'ok' : 'warn'}`}>
+              {tariff.band}
+            </span>
+          </div>
+          <div className="hero-num">
+            {last.power !== null ? <Num value={last.power} decimals={1} /> : '–'}
+            <span className="kpi__unit">W</span>
+          </div>
+          <div className="mt-2 text-[13px] text-[var(--ink-3)]">
+            {!online
+              ? `Device offline. Taken ${fmtAgo(ageSec)} ago, at ${fmtStamp(last.at)}.`
+              : costPerHour !== null
+              ? `${(costPerHour * 1000).toFixed(1)} fils an hour at the ${tariff.band.toLowerCase()} rate (${tariff.rate} fils/kWh)`
+              : 'No power reading yet'}
+          </div>
+          {/* the sparkline takes the card's remaining height, so there's no empty band */}
+          <div className="relative mt-4 min-h-[96px] flex-1">
+            <div className="absolute inset-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartPower} margin={{ top: 4, right: 0, bottom: 0, left: 0 }}>
+                <defs>
+                  <linearGradient id="heroFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor={P.line} stopOpacity={0.22} />
+                    <stop offset="100%" stopColor={P.line} stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="t" type="number" domain={['dataMin - 60000', 'dataMax + 60000']} hide />
+                <YAxis hide domain={['auto', 'auto']} />
+                <Area
+                  type="monotone"
+                  dataKey="v"
+                  stroke={P.line}
+                  strokeWidth={1.75}
+                  fill="url(#heroFill)"
+                  connectNulls={false}
+                  dot={soloDot(P.line)}
+                  activeDot={false}
+                  isAnimationActive={false}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+            </div>
+          </div>
+        </Card>
+        <Kpi
+          i={2}
+          icon={Zap}
+          value={last.voltage ?? '–'}
+          decimals={1}
+          unit="V"
+          label="Voltage"
+          sub="Normal 207–253 V"
+          badge={last.voltage !== null && (last.voltage < 207 || last.voltage > 253) ? { text: 'Out of range', tone: 'crit' } : undefined}
+        />
+        <Kpi
+          i={3}
+          icon={Activity}
+          value={last.current ?? '–'}
+          decimals={3}
+          unit="A"
+          label="Current"
+          sub={currentTrend !== null ? `${currentTrend >= 0 ? '+' : ''}${currentTrend.toFixed(0)}% an hour` : 'Trend needs more readings'}
+          badge={currentTrend !== null && Math.abs(currentTrend) >= 10 ? { text: currentTrend > 0 ? 'Rising' : 'Falling', tone: 'warn' } : undefined}
+        />
+        <Kpi
+          i={4}
+          icon={Gauge}
+          value={last.pf ?? '–'}
+          decimals={2}
+          label="Power factor"
+          sub="Surcharge-free from 0.90"
+          badge={penalty > 0 ? { text: `+${penalty}%`, tone: penalty >= 6.5 ? 'crit' : 'warn' } : undefined}
+        />
+        <Kpi
+          i={5}
+          icon={BatteryCharging}
+          value={last.energy !== null ? last.energy * 1000 : '–'}
+          decimals={1}
+          unit="Wh"
+          label="Energy since start"
+          sub={s.restarts ? `${s.restarts} restarts in view` : 'No restarts in view'}
+        />
+        <Card i={6} className="flex flex-col gap-4 p-5 sm:col-span-2 md:flex-row xl:col-span-4">
+          <div className="md:w-[240px] md:shrink-0">
+            <div className="kpi__label">
+              {tempSim ? 'Motor temperature (simulated)' : 'Motor temperature'}
+              {lastTemp && (
+                <span className={`badge ${STATUS[tempState(lastTemp.temperature)].tone}`}>{STATUS[tempState(lastTemp.temperature)].label}</span>
+              )}
+            </div>
+            <div className="kpi__value">
+              {lastTemp ? <Num value={lastTemp.temperature} decimals={1} /> : '–'}
+              <span className="kpi__unit">°C</span>
+            </div>
+            <div className="kpi__sub">
+              {lastTemp
+                ? `${tempSim ? 'Estimated from current until a sensor reports. ' : ''}Warning at ${TEMP_WARN} °C, alarm at ${TEMP_CRIT} °C${tempTrend !== null ? `. ${tempTrend >= 0 ? '+' : ''}${tempTrend.toFixed(1)} °C an hour` : ''}`
+                : 'No temperature yet. Wire the NTC sensor in Wokwi and enable field 6 in ThingSpeak.'}
+            </div>
+          </div>
+          <div className="relative min-h-[110px] flex-1">
+            {lastTemp ? (
+              <div className="absolute inset-0">
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={chartTemp} margin={{ top: 6, right: 0, bottom: 0, left: 0 }}>
+                    <defs>
+                      <linearGradient id="tempFill" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={P.line} stopOpacity={0.2} />
+                        <stop offset="100%" stopColor={P.line} stopOpacity={0} />
+                      </linearGradient>
+                    </defs>
+                    <XAxis dataKey="t" type="number" domain={['dataMin - 60000', 'dataMax + 60000']} hide />
+                    <YAxis hide domain={[(d) => Math.min(d - 5, 20), (d) => Math.max(d + 5, TEMP_CRIT + 5)]} />
+                    <ReferenceLine y={TEMP_WARN} stroke="var(--warn)" strokeDasharray="4 4" label={{ value: `${TEMP_WARN} °C`, position: 'insideTopRight', fill: 'var(--warn)', fontSize: 11 }} />
+                    <ReferenceLine y={TEMP_CRIT} stroke={P.crit} strokeDasharray="4 4" label={{ value: `${TEMP_CRIT} °C`, position: 'insideTopRight', fill: P.crit, fontSize: 11 }} />
+                    <Area type="monotone" dataKey="v" stroke={P.line} strokeWidth={1.75} fill="url(#tempFill)" connectNulls={false} dot={soloDot(P.line)} activeDot={false} isAnimationActive={false} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+            ) : (
+              <div className="well grid h-full min-h-[110px] place-items-center px-4 text-center text-[13px] text-[var(--ink-3)]">
+                The trend appears here once readings include temperature.
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      {/* The simulated energy and vibration panels sit between the live cards and AI diagnostics */}
+      {children}
+
+      {/* AI diagnostics (BluesMinds) */}
+      <Card i={8} id="sec-ai" className="mt-4 scroll-mt-6 p-5">
+        <CardHead
+          title="AI diagnostics"
+          sub={
+            aiAt
+              ? `${aiModel ?? 'The model'} read all ${s.count} readings at ${fmtClock(aiAt)}`
+              : `The AI reads all ${s.count} readings and looks for early signs of failure`
+          }
+          right={
+            <button onClick={runAi} disabled={aiBusy} className="btn-solid !min-h-[36px] !px-4 !text-[12px]">
+              <Stethoscope className="h-3.5 w-3.5" strokeWidth={1.75} />
+              {aiBusy ? 'Analysing…' : aiText ? 'Analyse again' : 'Analyse readings'}
+            </button>
+          }
+        />
+        <div ref={aiRef} className="well mt-4 max-h-[420px] min-h-[160px] overflow-y-auto p-4 text-[13.5px] leading-relaxed">
+          {aiError ? (
+            <p className="text-[var(--crit)]">{aiError}</p>
+          ) : aiText ? (
+            aiText.split('\n').map((line, k) => {
+              const t = line.trim();
+              if (!t) return <div key={k} className="h-2" />;
+              if (AI_HEADINGS.includes(t)) {
+                return (
+                  <div key={k} className="mt-2 text-[12px] font-semibold uppercase tracking-wide text-[var(--sub)] first:mt-0">
+                    {t}
+                  </div>
+                );
+              }
+              if (t.startsWith('[error]')) return <p key={k} className="text-[var(--crit)]">{t.slice(7).trim()}</p>;
+              return (
+                <p key={k} className={`text-[var(--ink)] ${t.startsWith('- ') ? 'pl-3 -indent-3' : ''}`}>
+                  {t.startsWith('- ') ? `• ${t.slice(2)}` : t}
+                </p>
+              );
+            })
+          ) : (
+            <div className="grid h-full min-h-[128px] place-items-center text-center text-[var(--ink-3)]">
+              {aiBusy ? 'Reading the history…' : 'No analysis yet.'}
+            </div>
+          )}
+          {aiBusy && aiText && <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-[var(--accent)] align-middle" />}
+        </div>
+      </Card>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main application
 // ---------------------------------------------------------------------------
 export default function App() {
   const [activeNav, setActiveNav] = useState('Overview');
+  const [chartMetric, setChartMetric] = useState('cost');
+  const [theme, setTheme] = useState(readStoredTheme);
+  const [liveStatus, setLiveStatus] = useState({ issueCount: 0, overall: 'ok', online: false, ago: null, channel: null, issues: [] });
+  const [playing, setPlaying] = useState(false);
 
-  // Simulation controls state (Default matching video reference values)
-  const [timeOfDay, setTimeOfDay] = useState(14.5); // 14:30
-  const [powerFactor, setPowerFactor] = useState(0.85); // 0.85
-  const [peakShiftPct, setPeakShiftPct] = useState(25); // 25%
-  const [bearingWear, setBearingWear] = useState(38);
-  const [anomalyInjected, setAnomalyInjected] = useState(false);
+  // Notifications popover on the bell: closes on outside click or Escape
+  const [bellOpen, setBellOpen] = useState(false);
+  const bellRef = useRef(null);
+  useEffect(() => {
+    if (!bellOpen) return undefined;
+    const onDown = (e) => {
+      if (!bellRef.current?.contains(e.target)) setBellOpen(false);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setBellOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [bellOpen]);
 
-  // Terminal state
-  const [ollamaLoading, setOllamaLoading] = useState(false);
-  const [ollamaOutput, setOllamaOutput] = useState('');
-  const terminalEndRef = useRef(null);
+  // The simulated panels follow the real Amman clock (same "now" as the live cards)
+  // until an hour is picked by clicking a bar or Play; pointing at a bar previews its hour.
+  const [clockHour, setClockHour] = useState(ammanHourNow);
+  const [pinnedHour, setPinnedHour] = useState(null);
+  const [previewHour, setPreviewHour] = useState(null);
+  const timeOfDay = previewHour ?? pinnedHour ?? clockHour;
+  const powerFactor = 0.85;
+  const peakShiftPct = 25;
+  const bearingWear = 38;
+  const anomalyInjected = false;
 
-  // Derived real-time metrics
+  const P = PALETTE[theme];
+
+  // Theme lives on <html> so the CSS tokens switch everywhere at once
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    try {
+      localStorage.setItem('plant-pulse-theme', theme);
+    } catch {
+      /* storage blocked: the theme just won't persist */
+    }
+  }, [theme]);
+
+  // "Play the day": one simulated hour per second
+  useEffect(() => {
+    if (!playing) return undefined;
+    const t = setInterval(() => setPinnedHour((h) => ((h ?? ammanHourNow()) + 0.25) % 24), 250);
+    return () => clearInterval(t);
+  }, [playing]);
+
+  // Real Amman wall clock (the dashboard itself runs on simulated time)
+  const [clock, setClock] = useState('');
+  useEffect(() => {
+    const tick = () => {
+      setClock(new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Amman' }));
+      setClockHour(ammanHourNow());
+    };
+    tick();
+    const t = setInterval(tick, 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Light up the menu item for whichever section sits in the middle of the screen
+  useEffect(() => {
+    const els = NAV_ITEMS.map((n) => document.getElementById(n.target)).filter(Boolean);
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (window.scrollY < 120) {
+          setActiveNav('Overview');
+          return;
+        }
+        const hit = entries.find((e) => e.isIntersecting);
+        if (!hit) return;
+        const item = NAV_ITEMS.find((n) => n.target === hit.target.id);
+        if (item) setActiveNav(item.name);
+      },
+      { rootMargin: '-30% 0px -60% 0px' }
+    );
+    els.forEach((el) => io.observe(el));
+    const onScroll = () => {
+      if (window.scrollY < 120) setActiveNav('Overview');
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      io.disconnect();
+      window.removeEventListener('scroll', onScroll);
+    };
+    // live sections only exist once the first readings arrive, so re-observe then
+  }, [liveStatus.channel]);
+
+  const goTo = (item) => {
+    setActiveNav(item.name);
+    document.getElementById(item.target)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  // Derived metrics
   const currentTariff = useMemo(() => getTariffByHour(timeOfDay), [timeOfDay]);
   const countdown = useMemo(() => getCountdown(timeOfDay), [timeOfDay]);
+  const pfPenaltyPct = useMemo(() => getPowerFactorSurchargePct(powerFactor), [powerFactor]);
+  const activeLoadKw = useMemo(() => loadAt(timeOfDay, peakShiftPct), [timeOfDay, peakShiftPct]);
 
-  // EMRC Stepped PF Penalty
-  const pfPenaltyPct = useMemo(() => {
-    if (powerFactor >= 0.90) return 0.0;
-    if (powerFactor >= 0.85) return 1.5;
-    if (powerFactor >= 0.80) return 3.5;
-    if (powerFactor >= 0.75) return 6.5;
-    return 12.0;
-  }, [powerFactor]);
-
-  // Active Load (kW) ~804 kW at 14:30
-  const activeLoadKw = useMemo(() => {
-    let base = currentTariff.band === 'Peak' ? 940 : currentTariff.band === 'Partial-Peak' ? 790 : 640;
-    if (currentTariff.band === 'Peak') {
-      base *= (1 - (peakShiftPct / 100) * 0.45);
-    } else if (currentTariff.band === 'Off-Peak') {
-      base += 250 * (peakShiftPct / 100) * 0.3;
-    }
-    const apparentMultiplier = 1 + (0.90 - Math.min(0.90, powerFactor)) * 0.35;
-    return Math.round(base * apparentMultiplier);
-  }, [currentTariff, peakShiftPct, powerFactor]);
-
-  // Hourly Cost (JD) ~56.31 JD at 14:30
-  const hourlyCostJd = useMemo(() => {
-    const rawCost = (activeLoadKw * currentTariff.rate) / 1000;
-    const withPenalty = rawCost * (1 + pfPenaltyPct / 100);
-    return Number(withPenalty.toFixed(2));
-  }, [activeLoadKw, currentTariff, pfPenaltyPct]);
-
-  // Main Pump Health & Vibration RMS (~72% Health, 3.38 mm/s)
   const pumpHealth = useMemo(() => {
     if (anomalyInjected) return 38;
     return Math.max(10, Math.min(99, Math.round(100 - bearingWear * 0.737)));
@@ -212,661 +806,465 @@ export default function App() {
     if (anomalyInjected) return 6.84;
     return Number((1.4 + (bearingWear / 100) * 5.21).toFixed(2));
   }, [bearingWear, anomalyInjected]);
+  // ISO 10816-3 zones for a medium pump on a rigid base (mm/s RMS)
+  const isoZone = vibrationRms < 1.4 ? 'A' : vibrationRms < 2.8 ? 'B' : vibrationRms < 4.5 ? 'C' : 'D';
 
-  // Vibration Spectrum
-  const spectrumData = useMemo(() => {
-    return generateVibrationData(bearingWear, anomalyInjected);
-  }, [bearingWear, anomalyInjected]);
+  const spectrumData = useMemo(() => generateVibrationData(bearingWear, anomalyInjected), [bearingWear, anomalyInjected]);
 
-  // Monthly Financial Breakdown (500,000 kWh/mo)
-  const financials = useMemo(() => {
-    const baselineBill = 33500;
-    const peakKwh = 125000;
-    const shiftedKwh = peakKwh * (peakShiftPct / 100);
-    const peakShiftSavings = Math.round((shiftedKwh * 20) / 1000); // 20 fils = 0.020 JD
-    const pfPenalty = Math.round(baselineBill * (pfPenaltyPct / 100));
-    const optimizedBill = baselineBill - peakShiftSavings;
-    const totalMonthlySavings = peakShiftSavings + pfPenalty;
-    const savePercent = Number(((totalMonthlySavings / baselineBill) * 100).toFixed(1));
-    const annualRoi = totalMonthlySavings * 12;
+  // Hourly load & cost from the same model as the live numbers
+  const hourly = useMemo(
+    () =>
+      Array.from({ length: 24 }, (_, h) => {
+        const load = loadAt(h, peakShiftPct);
+        const t = getTariffByHour(h);
+        const cost = Number((((load * t.rate) / 1000) * (1 + pfPenaltyPct / 100)).toFixed(2));
+        return { h, label: `${h.toString().padStart(2, '0')}`, load, cost, band: t.band };
+      }),
+    [peakShiftPct, pfPenaltyPct]
+  );
+  const dayCost = useMemo(() => hourly.reduce((s, p) => s + p.cost, 0), [hourly]);
 
-    return {
-      baselineBill,
-      peakShiftSavings,
-      pfPenalty,
-      optimizedBill,
-      savePercent,
-      annualRoi
-    };
-  }, [peakShiftPct, pfPenaltyPct]);
+  // JD a month the power-factor surcharge costs (500,000 kWh/mo baseline)
+  const pfPenaltyJd = useMemo(() => Math.round(computeFinancials({ powerFactor, peakShiftPct }).pfPenaltyAmount), [powerFactor, peakShiftPct]);
 
-  // Toggle Anomaly Stress Test
-  const handleToggleAnomaly = (checked) => {
-    setAnomalyInjected(checked);
-    if (checked) {
-      setPowerFactor(0.73);
-      setBearingWear(85);
-    } else {
-      setPowerFactor(0.85);
-      setBearingWear(38);
-    }
-  };
+  // Operator view: is it healthy, what is the bottleneck, what to do
+  const checks = useMemo(() => {
+    // zone C is "not fit for long-term running", so it can't be shown as nominal
+    const pump = anomalyInjected || pumpHealth < 40 || isoZone === 'D' ? 'crit' : pumpHealth < 70 || isoZone === 'C' ? 'warn' : 'ok';
+    const pf = pfPenaltyPct >= 6.5 ? 'crit' : pfPenaltyPct > 0 ? 'warn' : 'ok';
+    const tariff = currentTariff.band === 'Peak' ? 'warn' : 'ok';
+    return [
+      {
+        key: 'pump',
+        name: 'Main pump',
+        state: pump,
+        detail: pump === 'crit' ? `2X harmonic at 59 Hz, ${vibrationRms} mm/s` : `${vibrationRms} mm/s, ISO zone ${isoZone}, ${vibrationRms < 3.5 ? 'under' : 'over'} the 3.5 alarm limit`,
+      },
+      {
+        key: 'pf',
+        name: 'Power factor',
+        state: pf,
+        detail: pfPenaltyPct > 0 ? `${powerFactor.toFixed(2)}, +${pfPenaltyPct}% surcharge` : `${powerFactor.toFixed(2)}, no surcharge`,
+      },
+      {
+        key: 'tariff',
+        name: 'Tariff',
+        state: tariff,
+        detail: `${currentTariff.band}, ${currentTariff.rate} fils until ${countdown.targetTime}`,
+      },
+    ];
+  }, [anomalyInjected, pumpHealth, isoZone, pfPenaltyPct, powerFactor, currentTariff, vibrationRms, countdown]);
 
-  // Reset demo
-  const handleReset = () => {
-    setTimeOfDay(14.5);
-    setPowerFactor(0.85);
-    setPeakShiftPct(25);
-    setBearingWear(38);
-    setAnomalyInjected(false);
-  };
+  const issueCount = checks.filter((c) => c.state !== 'ok').length;
+  const overall = checks.some((c) => c.state === 'crit') ? 'crit' : issueCount ? 'warn' : 'ok';
 
-  // Run AI Failure Prognosis
-  const handleRunPrognosis = () => {
-    setOllamaLoading(true);
-    setOllamaOutput('');
+  const action = useMemo(() => {
+    if (checks[0].state === 'crit') return 'Switch duty to standby pump P-101A and send the alignment crew to the coupling.';
+    if (checks[1].state !== 'ok')
+      return `Bring the capacitor bank online to reach 0.90. That removes ${pfPenaltyJd.toLocaleString()} JD a month.`;
+    if (checks[2].state !== 'ok') return `Peak rate until ${countdown.targetTime}. Hold shiftable load until then.`;
+    if (checks[0].state === 'warn') return 'Bearing wear is climbing. Book a thermographic check this week.';
+    return `Nothing to do. ${countdown.targetBand} starts at ${countdown.targetTime}.`;
+  }, [checks, pfPenaltyJd, countdown]);
 
-    const diagnosis = anomalyInjected
-      ? `[OLLAMA LLM DIAGNOSTIC ENGINE v2.4 - INFERENCE LOG]
-================================================================================
-ASSET: Main Feed Pump Motor P-101B (Zarqa Line A)
-TIMESTAMP: 2026-11-04 14:30:00 AST | EMRC MEDIUM-INDUSTRY REGULATORY TIER
-
-1. VIBRATION FREQUENCY DOMAIN PROGNOSIS (ISO 10816 CLASS D):
-   • Severe 2X RPM harmonic peak (59.0 Hz) detected at ${vibrationRms} mm/s RMS.
-   • Root Cause: Angular coupling misalignment and motor-to-pump mechanical looseness.
-   • Sub-harmonic micro-spalling indicated along SKF 7318 inner raceway (BPFI 236 Hz).
-   • Estimated Time-to-Failure (TTF): 36 to 48 continuous operating hours.
-
-2. EMRC TARIFF ARBITRAGE & POWER FACTOR REMEDIATION:
-   • Operating at sub-0.75 cos φ incurs an active +6.5% EMRC surcharge (+${financials.pfPenalty} JD/month).
-   • Action: Switch Capacitor Bank Stage 3 to restore PF >= 0.90, removing surcharge.
-   • Shifting ${peakShiftPct}% load to Off-Peak (05:00-14:00 @ 59 fils) captures ${financials.peakShiftSavings} JD/month.
-
-3. PRESCRIPTIVE WORK ORDER:
-   • Immediate: Curtail load or switch duty to standby unit Pump P-101A.
-   • Dispatch: Laser alignment team for coupling recalibration (< 0.05 mm tolerance).
-   • Lubrication: Grease replenishment with ISO VG 220 synthetic.`
-      : `[OLLAMA LLM DIAGNOSTIC ENGINE v2.4 - INFERENCE LOG]
-================================================================================
-ASSET: Main Feed Pump Motor P-101B (Zarqa Line A)
-TIMESTAMP: 2026-11-04 14:30:00 AST | EMRC MEDIUM-INDUSTRY REGULATORY TIER
-
-1. RELIABILITY ASSESSMENT (ISO 10816 CLASS B):
-   • Current vibration: ${vibrationRms} mm/s RMS (Healthy operational envelope < 3.5 mm/s).
-   • Fundamental 1X running frequency (29.5 Hz) within standard tolerances.
-   • Estimated Remaining Useful Life (RUL): > 4,200 operating hours.
-
-2. EMRC TARIFF ARBITRAGE STRATEGY:
-   • Active rate band: ${currentTariff.band} (${currentTariff.rate} fils/kWh).
-   • Current PF is ${powerFactor.toFixed(2)}. Correcting to >= 0.90 eliminates ${financials.pfPenalty} JD/mo penalty.
-   • Shifting ${peakShiftPct}% of peak pumping load saves ${financials.peakShiftSavings} JD/month in TOU arbitrage.
-   • Annual Plant Pulse ROI potential: ${financials.annualRoi.toLocaleString()} JD / year.
-
-3. RECOMMENDATIONS:
-   • Maintain automated TOU load-scheduling profile on Line A feed cycle.
-   • Next scheduled thermographic bearing audit: 180 operating hours.`;
-
-    let i = 0;
-    const interval = setInterval(() => {
-      i += 8;
-      setOllamaOutput(diagnosis.slice(0, i));
-      if (terminalEndRef.current) {
-        terminalEndRef.current.scrollIntoView({ behavior: 'smooth' });
-      }
-      if (i >= diagnosis.length) {
-        clearInterval(interval);
-        setOllamaOutput(diagnosis);
-        setOllamaLoading(false);
-      }
-    }, 15);
-  };
+  // the ring takes the same colour as the pump's status badge
+  const pumpColor = STATUS[checks[0].state].color;
+  const pfTone = pfPenaltyPct === 0 ? 'ok' : pfPenaltyPct >= 6.5 ? 'crit' : 'warn';
+  const bandTone = currentTariff.band === 'Peak' ? 'crit' : currentTariff.band === 'Off-Peak' ? 'ok' : 'warn';
+  const nowHour = Math.floor(timeOfDay);
+  const overallMeta = STATUS[overall];
+  // the bell and the Diagnostics badge count live device issues plus the simulated plant's
+  const alertCount = liveStatus.issueCount + issueCount;
+  // same items the count is made of: live device issues first, then the simulated plant's
+  const notifications = [
+    ...liveStatus.issues,
+    ...checks.filter((c) => c.state !== 'ok').map((c) => ({ ...c, key: `sim-${c.key}`, name: `${c.name} (simulated)` })),
+  ];
 
   return (
-    <div className="relative min-h-screen w-full bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#0f172a] via-[#0a192f] to-[#070d18] text-white p-6 overflow-hidden">
-      
-      {/* ------------------------------------------------------------------- */}
-      {/* Ambient Blurred Background Glows (Apple VisionOS Aesthetic)         */}
-      {/* ------------------------------------------------------------------- */}
-      <div className="absolute -top-32 -left-32 w-[34rem] h-[34rem] bg-teal-500/10 rounded-full blur-[120px] pointer-events-none" />
-      <div className="absolute top-1/3 -right-32 w-[38rem] h-[38rem] bg-blue-600/10 rounded-full blur-[140px] pointer-events-none" />
-      <div className="absolute -bottom-32 left-1/4 w-[42rem] h-[42rem] bg-cyan-500/10 rounded-full blur-[130px] pointer-events-none" />
+    <div className="relative min-h-screen w-full">
+      <div className="scene" aria-hidden />
 
-      {/* ------------------------------------------------------------------- */}
-      {/* Master Layout: Left Floating Sidebar + Right Content Area           */}
-      {/* ------------------------------------------------------------------- */}
-      <div className="relative z-10 flex gap-6 max-w-[1720px] mx-auto min-h-[calc(100vh-3rem)]">
-
-        {/* Floating Glassmorphic Sidebar */}
-        <aside className="w-64 bg-white/[0.03] backdrop-blur-xl border border-white/10 p-6 rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] flex flex-col justify-between shrink-0 hidden lg:flex">
-          <div>
-            {/* Brand Emblem */}
-            <div className="flex items-center gap-3 mb-8">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-teal-400 to-cyan-500 p-[1px] shadow-lg shadow-teal-500/20">
-                <div className="w-full h-full bg-[#0a192f] rounded-xl flex items-center justify-center">
-                  <Activity className="w-5 h-5 text-teal-300" />
-                </div>
-              </div>
-              <div>
-                <h1 className="font-bold text-lg text-white tracking-tight">Plant Pulse</h1>
-                <p className="text-[10px] text-white/50 uppercase tracking-widest font-semibold">QRCE Pitch Edition</p>
-              </div>
+      <div className="relative z-10 mx-auto max-w-[1440px] px-4 pb-6 sm:px-8">
+        <div className="flex min-w-0 flex-col">
+          {/* Title block: name, numbered section tabs, clock, theme, alerts */}
+          <header className="tb">
+            <div className="tb-brand">
+              <span className="tb-brand__name">Plant Pulse</span>
+              <span className="tb-brand__sub">Zarqa Line A</span>
             </div>
 
-            {/* Navigation Tabs */}
-            <nav className="space-y-1.5">
-              {[
-                { name: 'Overview', icon: LayoutDashboard },
-                { name: 'Diagnostics', icon: Activity },
-                { name: 'Analytics', icon: LineChart },
-                { name: 'Settings', icon: Settings },
-              ].map((item) => {
-                const Icon = item.icon;
-                const isActive = activeNav === item.name;
+            <nav className="tb-nav" aria-label="Sections">
+              {NAV_ITEMS.map((item) => {
+                const on = activeNav === item.name;
                 return (
-                  <button
-                    key={item.name}
-                    onClick={() => setActiveNav(item.name)}
-                    className={`w-full flex items-center gap-3.5 px-4 py-3 rounded-xl text-sm font-medium transition-all duration-200 ${
-                      isActive
-                        ? 'bg-white/10 text-white shadow-lg shadow-white/5 border border-white/15'
-                        : 'text-white/60 hover:text-white hover:bg-white/[0.04]'
-                    }`}
-                  >
-                    <Icon className={`w-4 h-4 ${isActive ? 'text-teal-300' : 'text-white/60'}`} />
-                    <span>{item.name}</span>
-                    {isActive && (
-                      <div className="ml-auto w-1.5 h-1.5 rounded-full bg-teal-400 shadow-[0_0_8px_#2dd4bf]" />
+                  <button key={item.name} onClick={() => goTo(item)} aria-current={on ? 'true' : undefined} className="tb-tab">
+                    {item.name}
+                    {item.alerts && alertCount > 0 && <span className="tb-tab__count num">{alertCount}</span>}
+                    {on && (
+                      <motion.span layoutId="tabActive" className="tb-tab__bar" transition={{ type: 'spring', stiffness: 460, damping: 38 }} />
                     )}
                   </button>
                 );
               })}
             </nav>
-          </div>
 
-          {/* Plant Location Pill */}
-          <div className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
-            <div className="flex items-center gap-2 mb-1">
-              <div className="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_8px_#34d399]" />
-              <span className="text-xs font-semibold text-white">Zarqa Industrial Line A</span>
-            </div>
-            <p className="text-[11px] text-white/50 leading-relaxed font-mono">
-              EMRC Medium-Industry Tier
-            </p>
-          </div>
-        </aside>
-
-        {/* Main Content Area */}
-        <main className="flex-1 space-y-6 min-w-0">
-
-          {/* Top Header Row (Greeting, Search Bar, Profile) */}
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-2xl font-bold text-white tracking-tight">
-                Good afternoon, Plant Manager
-              </h2>
-              <p className="text-sm text-white/60 mt-0.5">
-                Here's the real-time energy & predictive maintenance telemetry for Zarqa Line A.
-              </p>
-            </div>
-
-            <div className="flex items-center gap-3">
-              {/* Glass Search Bar */}
-              <div className="relative">
-                <Search className="w-4 h-4 text-white/40 absolute left-3.5 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="Search assets, sensors..."
-                  className="bg-white/[0.03] backdrop-blur-xl border border-white/10 rounded-full pl-9 pr-4 py-2 text-xs text-white placeholder-white/40 focus:outline-none focus:border-white/30 transition-all w-60 shadow-lg"
-                />
-              </div>
-
-              {/* Notification Pill */}
-              <button className="w-9 h-9 rounded-full bg-white/[0.03] backdrop-blur-xl border border-white/10 flex items-center justify-center text-white/80 hover:text-white hover:bg-white/10 transition-all shadow-lg">
-                <Bell className="w-4 h-4" />
+            <div className="tb-tools">
+              <span className="tb-clock num" title="Amman time">
+                {clock || '--:--'} <span>Amman</span>
+              </span>
+              <button
+                aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                onClick={() => {
+                  const next = theme === 'dark' ? 'light' : 'dark';
+                  // flushSync so the whole page is in the new theme before the browser snapshots it
+                  const apply = () => {
+                    document.documentElement.dataset.theme = next;
+                    flushSync(() => setTheme(next));
+                  };
+                  // cross-fade old page into new; browsers without View Transitions just switch
+                  if (document.startViewTransition) document.startViewTransition(apply);
+                  else apply();
+                }}
+                className="tb-btn"
+              >
+                {theme === 'dark' ? <Sun className="h-4 w-4" strokeWidth={1.75} /> : <Moon className="h-4 w-4" strokeWidth={1.75} />}
               </button>
-
-              {/* Profile Avatar */}
-              <div className="w-9 h-9 rounded-full bg-gradient-to-tr from-teal-400 to-cyan-500 p-[1px] shadow-lg">
-                <div className="w-full h-full rounded-full bg-[#0f172a] flex items-center justify-center text-xs font-bold text-teal-300">
-                  PM
-                </div>
+              <div ref={bellRef} className="relative">
+                <button
+                  aria-label={`${alertCount} notifications`}
+                  aria-expanded={bellOpen}
+                  aria-haspopup="dialog"
+                  className="tb-btn"
+                  onClick={() => setBellOpen((o) => !o)}
+                >
+                  <Bell className="h-4 w-4" strokeWidth={1.75} />
+                  {alertCount > 0 && <span className="tb-btn__count num">{alertCount}</span>}
+                </button>
+                {bellOpen && (
+                  <div role="dialog" aria-label="Notifications" className="pop">
+                    <div className="pop__title">Notifications</div>
+                    {notifications.length ? (
+                      <ul>
+                        {notifications.map((n) => (
+                          <li key={n.key} className="pop__row">
+                            <span className="dot mt-1.5" style={{ color: STATUS[n.state].color }} />
+                            <div className="min-w-0 flex-1">
+                              <div className="text-[13px] font-medium text-[var(--ink)]">{n.name}</div>
+                              <div className="text-[11.5px] text-[var(--ink-3)]">{n.detail}</div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <div className="px-3 py-4 text-[12.5px] text-[var(--ink-3)]">Nothing needs attention.</div>
+                    )}
+                    <button
+                      className="btn-ghost w-full"
+                      onClick={() => {
+                        setBellOpen(false);
+                        goTo(NAV_ITEMS[NAV_ITEMS.length - 1]);
+                      }}
+                    >
+                      Open AI diagnostics
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-          </div>
+          </header>
 
-          {/* EMRC TOU Bar: Soft, Glass Pill-Shaped Timeline */}
-          <div className="bg-white/[0.03] backdrop-blur-xl border border-white/10 px-6 py-4 rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] flex flex-wrap items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div
-                className="w-3 h-3 rounded-full animate-pulse shadow-md"
-                style={{ backgroundColor: currentTariff.color }}
-              />
-              <span className="text-sm font-semibold text-white">
-                Active Tariff: <span style={{ color: currentTariff.color }}>{currentTariff.band}</span>
-              </span>
-              <span className="text-xs text-white/50 font-mono">
-                ({currentTariff.rate} fils/kWh)
-              </span>
-            </div>
-
-            {/* Visual Timeline Capsule */}
-            <div className="flex items-center gap-2 text-xs font-mono">
-              <span className="text-white/40">Schedule:</span>
-              <div className="flex items-center gap-1.5">
-                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/25 text-[11px]">
-                  Off-Peak (59 fils)
-                </span>
-                <span className="px-2.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/25 text-[11px]">
-                  Partial (69 fils)
-                </span>
-                <span className="px-2.5 py-0.5 rounded-full bg-red-500/15 text-red-300 border border-red-500/25 text-[11px]">
-                  Peak (79 fils)
-                </span>
-              </div>
-            </div>
-
-            {/* Countdown Badge */}
-            <div className="flex items-center gap-2 text-xs font-mono text-white/70">
-              <Clock className="w-3.5 h-3.5 text-teal-300" />
-              <span>Next: {countdown.targetBand} in <strong className="text-white">{countdown.countdownText}</strong></span>
-            </div>
-          </div>
-
-          {/* --------------------------------------------------------------- */}
-          {/* 4 Stat Cards Grid (Using EXACT Reference Component)             */}
-          {/* --------------------------------------------------------------- */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-
-            {/* Card 1: Plant Active Load */}
-            <StatCard
-              title="Plant Active Load"
-              value={`${activeLoadKw} kW`}
-              change="+2.4% vs baseline"
-              icon={Zap}
-              gradient="from-emerald-400 to-teal-600"
-              isPositive={true}
-            />
-
-            {/* Card 2: Hourly Energy Cost */}
-            <StatCard
-              title="Hourly Energy Cost"
-              value={`${hourlyCostJd.toFixed(2)} JD`}
-              change={`${currentTariff.band} (${currentTariff.rate} fils)`}
-              icon={DollarSign}
-              gradient="from-amber-400 to-orange-600"
-              isPositive={false}
-            />
-
-            {/* Card 3: Main Pump Health */}
-            <StatCard
-              title="Main Pump Health"
-              value={`${pumpHealth}%`}
-              change={`Vibration: ${vibrationRms} mm/s RMS`}
-              icon={Activity}
-              gradient="from-cyan-400 to-blue-600"
-              isPositive={pumpHealth > 65}
-            />
-
-            {/* Card 4: Power Factor (cos φ) */}
-            <StatCard
-              title="Power Factor (cos φ)"
-              value={`${powerFactor.toFixed(2)}`}
-              change={powerFactor < 0.88 ? `Penalty Surcharge: +${pfPenaltyPct}%` : 'Target ≥ 0.90 Met'}
-              icon={Gauge}
-              gradient="from-purple-400 to-indigo-600"
-              isPositive={powerFactor >= 0.88}
-            />
-
-          </div>
-
-          {/* --------------------------------------------------------------- */}
-          {/* Middle Section: Vibration Spectrum Chart (Recharts)             */}
-          {/* --------------------------------------------------------------- */}
-          <motion.div
-            whileHover={{ y: -3 }}
-            className="bg-white/[0.03] backdrop-blur-xl border border-white/10 p-6 rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)]"
-          >
-            <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+          <main className="sheet">
+            {/* Sheet header: what this is and whether anything is open */}
+            <div id="sec-top" className="sheet-head scroll-mt-24">
               <div>
-                <h3 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-                  <Activity className="w-5 h-5 text-cyan-300" />
-                  Vibration Spectrum & XAI Oscilloscope (P-101B)
-                </h3>
-                <p className="text-xs text-white/50 mt-0.5">
-                  Frequency Domain Analysis (0 – 1000 Hz) • Drive-End Accelerometer • 1770 RPM
+                <h1 className="sheet-title">{liveStatus.channel ?? 'Energy Monitor'}</h1>
+                <p className="sheet-sub">
+                  <span
+                    className="dot live"
+                    style={{ color: STATUS[alertCount ? (liveStatus.overall === 'crit' || overall === 'crit' ? 'crit' : 'warn') : 'ok'].color }}
+                  />
+                  {alertCount ? `${alertCount} open ${alertCount === 1 ? 'item' : 'items'}` : 'No open items'}
                 </p>
               </div>
-
-              {/* XAI Diagnosis Pill */}
-              <div className={`px-3.5 py-1.5 rounded-full border text-xs font-mono flex items-center gap-2 shadow-lg ${
-                anomalyInjected
-                  ? 'bg-red-500/15 border-red-500/35 text-red-300'
-                  : 'bg-cyan-500/15 border-cyan-500/35 text-cyan-200'
-              }`}>
-                <Sparkles className="w-3.5 h-3.5" />
-                <span>
-                  {anomalyInjected
-                    ? 'XAI Alert: 2X Harmonic Coupling Misalignment Detected (59.0 Hz)'
-                    : 'XAI Status: Dominant 1X Fundamental (29.5 Hz) within ISO 10816 Zone A'}
-                </span>
+              <div className="flex gap-2">
+              {pinnedHour !== null && !playing && (
+                <button onClick={() => setPinnedHour(null)} className="btn-ghost">
+                  Back to now
+                </button>
+              )}
+              <button onClick={() => setPlaying((p) => !p)} className="btn-ghost" aria-pressed={playing}>
+                {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
+                {playing ? 'Pause' : 'Play the day'}
+              </button>
               </div>
             </div>
 
-            {/* Glowing Cyan Recharts AreaChart with No Rigid SCADA Grid */}
-            <div className="h-64 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={spectrumData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="glowingCyanGlow" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#06b6d4" stopOpacity={0.4} />
-                      <stop offset="50%" stopColor="#06b6d4" stopOpacity={0.12} />
-                      <stop offset="100%" stopColor="#06b6d4" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <XAxis
-                    dataKey="freq"
-                    stroke="rgba(255,255,255,0.2)"
-                    tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10, fontFamily: 'monospace' }}
-                    tickLine={false}
-                    interval={10}
-                  />
-                  <YAxis
-                    stroke="rgba(255,255,255,0.2)"
-                    tick={{ fill: 'rgba(255,255,255,0.5)', fontSize: 10, fontFamily: 'monospace' }}
-                    tickLine={false}
-                    domain={[0, 8]}
-                  />
-                  <Tooltip
-                    content={({ active, payload }) => {
-                      if (active && payload && payload.length) {
-                        const d = payload[0].payload;
-                        return (
-                          <div className="bg-[#0f172a]/90 backdrop-blur-xl border border-white/20 rounded-xl p-3 text-xs shadow-2xl">
-                            <div className="font-mono text-cyan-300 font-bold">{d.freq} Hz</div>
-                            <div className="text-white mt-1">
-                              Amplitude: <span className="font-bold font-mono">{d.amp} mm/s</span>
-                            </div>
-                          </div>
-                        );
-                      }
-                      return null;
-                    }}
-                  />
-                  {/* Subtle Red Dashed ISO Limit Line */}
-                  <ReferenceLine
-                    y={3.5}
-                    stroke="#ef4444"
-                    strokeDasharray="4 4"
-                    strokeWidth={1}
-                    label={{
-                      value: 'ISO Class C/D (3.5 mm/s)',
-                      position: 'insideTopRight',
-                      fill: '#ef4444',
-                      fontSize: 10,
-                      fontFamily: 'monospace'
-                    }}
-                  />
-                  {/* Glowing 2X peak dot during anomaly */}
-                  {anomalyInjected && (
-                    <ReferenceDot
-                      x={60}
-                      y={6.2}
-                      r={6}
-                      fill="#ef4444"
-                      stroke="#ffffff"
-                      strokeWidth={2}
-                    />
-                  )}
-                  <Area
-                    type="monotone"
-                    dataKey="amp"
-                    stroke="#22d3ee"
-                    strokeWidth={2}
-                    fill="url(#glowingCyanGlow)"
-                    isAnimationActive={false}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
+            {/* Live cards first, then the simulated energy and vibration panels, then AI diagnostics */}
+            <LiveView P={P} onStatus={setLiveStatus}>
 
-            <div className="flex items-center justify-between text-[11px] font-mono text-white/40 mt-3 pt-3 border-t border-white/10">
-              <span>0 Hz (DC)</span>
-              <span>1X Running Speed (29.5 Hz)</span>
-              <span className={anomalyInjected ? 'text-red-300 font-bold' : ''}>2X Misalignment (59 Hz)</span>
-              <span>BPFO (148 Hz)</span>
-              <span>1000 Hz</span>
-            </div>
-          </motion.div>
-
-          {/* --------------------------------------------------------------- */}
-          {/* Bottom Section: Split into 2 Glass Cards (50% / 50%)            */}
-          {/* --------------------------------------------------------------- */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-            {/* Bottom Card 1: VC Pitch Simulator */}
-            <motion.div
-              whileHover={{ y: -3 }}
-              className="bg-white/[0.03] backdrop-blur-xl border border-white/10 p-6 rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <h3 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-                      <Sliders className="w-5 h-5 text-teal-300" />
-                      VC Pitch Simulator
-                    </h3>
-                    <p className="text-xs text-white/50 mt-0.5">
-                      Interactive mathematical scenario engine
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleReset}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-xs font-mono text-white/80 transition-all cursor-pointer"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    Reset
-                  </button>
-                </div>
-
-                {/* Anomaly Stress Test Toggle */}
-                <div className={`mb-5 p-4 rounded-xl border transition-all ${
-                  anomalyInjected
-                    ? 'bg-red-500/15 border-red-500/35 shadow-lg'
-                    : 'bg-white/[0.02] border-white/10'
-                }`}>
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className={`p-2 rounded-xl ${anomalyInjected ? 'bg-red-500/25 text-red-200' : 'bg-white/10 text-white/60'}`}>
-                        <Flame className="w-5 h-5" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-bold text-white">Inject Anomaly / Stress Test</div>
-                        <div className="text-xs text-white/50">Simulates PF degradation to 0.73 & high 2X harmonic vibration</div>
-                      </div>
+            {/* Energy: hourly chart + pump */}
+            <div id="sec-energy" className="mt-5 grid scroll-mt-6 grid-cols-1 gap-4 xl:grid-cols-3">
+              <Card i={1} className="p-5 xl:col-span-2">
+                <CardHead
+                  title="Electricity across the day"
+                  sub="Each hour, coloured by its tariff. Tap a bar to jump to it."
+                  right={
+                    <div className="seg" role="group" aria-label="Chart metric">
+                      <button aria-pressed={chartMetric === 'cost'} onClick={() => setChartMetric('cost')}>
+                        JD / hour
+                      </button>
+                      <button aria-pressed={chartMetric === 'load'} onClick={() => setChartMetric('load')}>
+                        kW
+                      </button>
                     </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={anomalyInjected}
-                        onChange={(e) => handleToggleAnomaly(e.target.checked)}
-                        className="sr-only peer"
+                  }
+                />
+                {/* Apple Health style: the headline number sits above the chart */}
+                <div className="mt-4">
+                  <div className="text-[12px] font-semibold uppercase tracking-wide text-[var(--ink-3)]">Total today</div>
+                  <div className="num text-[30px] font-bold leading-tight tracking-tight">
+                    <Num value={dayCost} />
+                    <span className="ml-1 text-[15px] font-semibold text-[var(--ink-3)]">JD</span>
+                  </div>
+                </div>
+                <div className="mt-2 h-[210px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={hourly}
+                      barCategoryGap="22%"
+                      margin={{ top: 12, right: 0, left: 4, bottom: 0 }}
+                      className="cursor-pointer"
+                      onMouseMove={(st) => {
+                        const p = hourly[Number(st?.activeTooltipIndex)];
+                        if (p) setPreviewHour(p.h + 0.5);
+                      }}
+                      onMouseLeave={() => setPreviewHour(null)}
+                      onClick={(st) => {
+                        const p = hourly[Number(st?.activeTooltipIndex)];
+                        if (p) setPinnedHour(p.h + 0.5); // a click keeps this hour after the pointer leaves
+                      }}
+                    >
+                      <CartesianGrid vertical={false} stroke={P.ring} strokeDasharray="2 4" />
+                      <XAxis
+                        dataKey="label"
+                        tickLine={false}
+                        axisLine={{ stroke: P.ring }}
+                        tick={{ fill: P.tick, fontSize: 11 }}
+                        interval={5}
+                        tickMargin={6}
                       />
-                      <div className="w-11 h-6 bg-white/20 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-red-500"></div>
-                    </label>
+                      <YAxis orientation="right" tickLine={false} axisLine={false} tick={{ fill: P.tick, fontSize: 11 }} width={34} tickCount={4} />
+                      <ReferenceLine
+                        y={hourly.reduce((s, p) => s + p[chartMetric], 0) / hourly.length}
+                        stroke={P.tick}
+                        strokeDasharray="4 4"
+                        label={{ value: 'avg', position: 'insideTopLeft', fill: P.tick, fontSize: 11 }}
+                      />
+                      <Tooltip
+                        cursor={false}
+                        content={({ active, payload }) =>
+                          active && payload && payload.length ? (
+                            <div className="card px-3 py-2 text-xs" style={{ animation: 'none' }}>
+                              <div className="font-semibold">
+                                {payload[0].payload.label}:00 · {payload[0].payload.band}
+                              </div>
+                              <div className="num mt-0.5 text-[var(--ink-2)]">
+                                {payload[0].payload.load} kW · {payload[0].payload.cost} JD
+                              </div>
+                            </div>
+                          ) : null
+                        }
+                      />
+                      <Bar
+                        dataKey={chartMetric}
+                        radius={[5, 5, 5, 5]}
+                        maxBarSize={18}
+                        isAnimationActive={false}
+                      >
+                        {/* the current hour is full strength, the rest recede */}
+                        {hourly.map((p) => (
+                          <Cell key={p.h} fill={BAND_COLOR[p.band] ?? P.bar} fillOpacity={p.h === nowHour ? 1 : theme === 'dark' ? 0.6 : 0.4} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[12px] text-[var(--ink-3)]">
+                  {BANDS.map((b) => (
+                    <span key={b.band} className="flex items-center gap-1.5">
+                      <span className="h-2 w-2 rounded-full" style={{ background: BAND_COLOR[b.band] }} />
+                      {b.band} {b.hours} · <span className="num">{b.rate}</span> fils
+                    </span>
+                  ))}
+                </div>
+              </Card>
+
+              <Card i={2} alarm={anomalyInjected} className="flex flex-col p-5">
+                <CardHead
+                  title="Main pump P-101B"
+                  sub="Drive end · 1770 RPM"
+                  right={<span className={`badge ${STATUS[checks[0].state].tone}`}>{STATUS[checks[0].state].label}</span>}
+                />
+                <div className="my-4">
+                  <Ring value={pumpHealth} color={pumpColor} track={P.ring} />
+                </div>
+                <dl className="rule mt-auto grid grid-cols-3 divide-x border-t pt-3 [&>div]:border-[var(--rule)]">
+                  {[
+                    { v: vibrationRms.toFixed(2), l: 'mm/s RMS' },
+                    { v: `${bearingWear}%`, l: 'bearing wear' },
+                    { v: isoZone, l: 'ISO zone' },
+                  ].map((b) => (
+                    <div key={b.l} className="px-2 text-center">
+                      <dd className="num text-[16px] font-bold text-[var(--ink)]">{b.v}</dd>
+                      <dt className="text-[10.5px] text-[var(--ink-3)]">{b.l}</dt>
+                    </div>
+                  ))}
+                </dl>
+              </Card>
+            </div>
+
+            {/* Right-now numbers */}
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <Kpi
+                i={3}
+                icon={Zap}
+                value={activeLoadKw}
+                unit="kW"
+                label="Plant load"
+                sub="Right now"
+                badge={{ text: currentTariff.band, tone: bandTone }}
+              />
+              <Kpi
+                i={5}
+                icon={Gauge}
+                value={powerFactor}
+                decimals={2}
+                label="Power factor"
+                sub="Surcharge-free from 0.90"
+                badge={pfPenaltyPct > 0 ? { text: `+${pfPenaltyPct}%`, tone: pfTone } : undefined}
+              />
+              <Kpi i={6} icon={Timer} value={countdown.countdownText} label="Until the rate changes" sub={`${countdown.targetBand} at ${countdown.targetTime}`} />
+            </div>
+
+            {/* Vibration + what needs attention */}
+            <div id="sec-vibration" className="mt-4 grid scroll-mt-6 grid-cols-1 gap-4 xl:grid-cols-3">
+              <Card i={9} alarm={anomalyInjected} className="p-5 xl:col-span-2">
+                <CardHead
+                  title="Vibration spectrum"
+                  sub="Main pump motor, 0 – 1000 Hz"
+                  right={
+                    <span className={`badge ${anomalyInjected ? 'crit' : 'info'}`}>
+                      {anomalyInjected ? '2X peak at 59 Hz' : '1X peak at 29.5 Hz'}
+                    </span>
+                  }
+                />
+                <div className={`spec mt-3 h-[230px] ${anomalyInjected ? 'is-alarm' : ''}`}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart data={spectrumData} margin={{ top: 10, right: 8, left: -18, bottom: 0 }}>
+                      <defs>
+                        <linearGradient id="specFill" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor={P.line} stopOpacity={0.35} />
+                          <stop offset="100%" stopColor={P.line} stopOpacity={0.02} />
+                        </linearGradient>
+                        <linearGradient id="specFillRed" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor={P.crit} stopOpacity={0.35} />
+                          <stop offset="100%" stopColor={P.crit} stopOpacity={0.02} />
+                        </linearGradient>
+                      </defs>
+                      <XAxis
+                        dataKey="freq"
+                        tickLine={false}
+                        axisLine={false}
+                        tick={{ fill: P.tick, fontSize: 10 }}
+                        ticks={[0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]}
+                        interval="preserveStartEnd"
+                        minTickGap={18}
+                        unit=" Hz"
+                      />
+                      <YAxis tickLine={false} axisLine={false} tick={{ fill: P.tick, fontSize: 10 }} domain={[0, 8]} />
+                      <Tooltip
+                        cursor={{ stroke: P.tick, strokeDasharray: '3 3' }}
+                        content={({ active, payload }) =>
+                          active && payload && payload.length ? (
+                            <div className="card px-3 py-2 text-xs" style={{ animation: 'none' }}>
+                              <div className="num font-semibold">{payload[0].payload.freq} Hz</div>
+                              <div className="num text-[var(--ink-2)]">{payload[0].payload.amp} mm/s</div>
+                            </div>
+                          ) : null
+                        }
+                      />
+                      <ReferenceLine
+                        y={3.5}
+                        stroke={P.crit}
+                        strokeDasharray="5 5"
+                        label={{ value: 'Alarm limit, 3.5 mm/s', position: 'insideTopRight', fill: P.crit, fontSize: 10 }}
+                      />
+                      {anomalyInjected && (
+                        <ReferenceDot x={60} y={6.2} r={5} fill={P.crit} stroke="#fff" strokeWidth={2} className="fade-in-late" />
+                      )}
+                      {/* blue and red copies of the same trace; CSS cross-fades them */}
+                      <Area
+                        type="monotone"
+                        dataKey="amp"
+                        className="spec-normal"
+                        stroke={P.line}
+                        strokeWidth={2}
+                        fill="url(#specFill)"
+                        isAnimationActive
+                        animationDuration={600}
+                        animationEasing="ease-in-out"
+                      />
+                      <Area
+                        type="monotone"
+                        dataKey="amp"
+                        className="spec-fault"
+                        stroke={P.crit}
+                        strokeWidth={2}
+                        fill="url(#specFillRed)"
+                        isAnimationActive
+                        animationDuration={600}
+                        animationEasing="ease-in-out"
+                        activeDot={false}
+                        tooltipType="none"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </Card>
+
+              <Card i={10} alarm={overall === 'crit'} className="flex flex-col p-5">
+                <CardHead title="Needs attention" right={<span className={`badge ${overallMeta.tone}`}>{overallMeta.label}</span>} />
+                <ul className="mt-2 text-[13px]">
+                  {checks.map((c, k) => {
+                    const m = STATUS[c.state];
+                    return (
+                      <li key={c.key} className={`flex items-center gap-3 py-2.5 ${k ? 'rule border-t' : ''}`}>
+                        <span className="dot" style={{ color: m.color }} />
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-[var(--ink)]">{c.name}</div>
+                          <div className="text-[11.5px] text-[var(--ink-3)]">{c.detail}</div>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className="mt-auto rounded-[14px] bg-[var(--solid-bg)] px-4 py-3 text-[var(--solid-fg)]">
+                  <div className="flex items-start gap-2.5">
+                    <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 opacity-70" />
+                    <p className="text-[13px] leading-relaxed">{action}</p>
                   </div>
                 </div>
+              </Card>
+            </div>
 
-                {/* Slender Glass Sliders */}
-                <div className="space-y-4">
-                  {/* Slider 1: Time of Day */}
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-white/70 flex items-center gap-1.5 font-medium">
-                        <Clock className="w-3.5 h-3.5 text-teal-300" />
-                        Time of Day (TOU Schedule)
-                      </span>
-                      <span className="font-mono font-bold text-teal-300 text-sm">
-                        {Math.floor(timeOfDay).toString().padStart(2, '0')}:{Math.floor((timeOfDay % 1) * 60).toString().padStart(2, '0')}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0"
-                      max="23.9"
-                      step="0.25"
-                      value={timeOfDay}
-                      onChange={(e) => setTimeOfDay(parseFloat(e.target.value))}
-                      className="w-full"
-                    />
-                    <div className="flex justify-between text-[10px] text-white/40 font-mono mt-0.5">
-                      <span>00:00 (Partial)</span>
-                      <span>12:00 (Off-Peak)</span>
-                      <span>19:00 (Peak)</span>
-                      <span>23:59</span>
-                    </div>
-                  </div>
+            </LiveView>
+          </main>
 
-                  {/* Slider 2: Power Factor Correction */}
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-white/70 flex items-center gap-1.5 font-medium">
-                        <Zap className="w-3.5 h-3.5 text-amber-300" />
-                        Power Factor Correction (cos φ)
-                      </span>
-                      <span className={`font-mono font-bold text-sm ${powerFactor < 0.88 ? 'text-red-300' : 'text-teal-300'}`}>
-                        {powerFactor.toFixed(2)}
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0.60"
-                      max="1.00"
-                      step="0.01"
-                      value={powerFactor}
-                      onChange={(e) => setPowerFactor(parseFloat(e.target.value))}
-                      className="w-full"
-                    />
-                    <div className="flex justify-between text-[10px] text-white/40 font-mono mt-0.5">
-                      <span className="text-red-300">0.60 (Penalty)</span>
-                      <span>0.88 (EMRC Threshold)</span>
-                      <span className="text-teal-300">1.00 (Unity)</span>
-                    </div>
-                  </div>
-
-                  {/* Slider 3: Peak Load Shifted */}
-                  <div>
-                    <div className="flex items-center justify-between text-xs mb-1.5">
-                      <span className="text-white/70 flex items-center gap-1.5 font-medium">
-                        <TrendingDown className="w-3.5 h-3.5 text-cyan-300" />
-                        Peak Load Shifted to Off-Peak
-                      </span>
-                      <span className="font-mono font-bold text-cyan-300 text-sm">
-                        {peakShiftPct}%
-                      </span>
-                    </div>
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      step="5"
-                      value={peakShiftPct}
-                      onChange={(e) => setPeakShiftPct(parseInt(e.target.value, 10))}
-                      className="w-full"
-                    />
-                    <div className="flex justify-between text-[10px] text-white/40 font-mono mt-0.5">
-                      <span>0% (Standard)</span>
-                      <span>50%</span>
-                      <span className="text-teal-300">100% Shifted</span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Instant Shift Savings Highlight Pill */}
-              <div className="mt-5 p-4 rounded-xl bg-white/[0.03] border border-white/10 flex items-center justify-between">
-                <span className="text-xs text-white/70 font-medium">Instant Shift Savings:</span>
-                <span className="font-mono text-base font-bold text-emerald-300 tabular-nums">
-                  +{financials.peakShiftSavings.toLocaleString()} JD / month
-                </span>
-              </div>
-            </motion.div>
-
-            {/* Bottom Card 2: AI Diagnostics Console & Financial Impact */}
-            <motion.div
-              whileHover={{ y: -3 }}
-              className="bg-white/[0.03] backdrop-blur-xl border border-white/10 p-6 rounded-2xl shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] flex flex-col justify-between"
-            >
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <div>
-                    <h3 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
-                      <Terminal className="w-5 h-5 text-teal-300" />
-                      AI Diagnostics & Financial Impact
-                    </h3>
-                    <p className="text-xs text-white/50 mt-0.5">
-                      Local Ollama LLM Prognosis & EMRC 500k kWh Cost Model
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={handleRunPrognosis}
-                    disabled={ollamaLoading}
-                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-gradient-to-r from-teal-400 to-cyan-500 text-slate-900 font-bold text-xs shadow-lg shadow-teal-500/20 hover:brightness-110 active:scale-95 disabled:opacity-50 transition-all cursor-pointer"
-                  >
-                    <Sparkles className={`w-3.5 h-3.5 ${ollamaLoading ? 'animate-spin' : ''}`} />
-                    <span>{ollamaLoading ? 'Synthesizing...' : 'Run AI Failure Prognosis'}</span>
-                  </button>
-                </div>
-
-                {/* Soft Frosted Glass Terminal Screen (NO harsh black box) */}
-                <div className="h-44 w-full rounded-xl bg-white/[0.02] backdrop-blur-md border border-white/10 p-4 font-mono text-xs overflow-y-auto leading-relaxed shadow-inner">
-                  {ollamaOutput ? (
-                    <div className="text-emerald-300 whitespace-pre-wrap">
-                      {ollamaOutput}
-                      <div ref={terminalEndRef} />
-                    </div>
-                  ) : (
-                    <div className="flex h-full flex-col items-center justify-center text-center text-white/40 font-mono text-xs">
-                      <Terminal className="w-6 h-6 mb-2 opacity-40 text-teal-300" />
-                      <p>Click "Run AI Failure Prognosis" to stream LLM diagnostics.</p>
-                      <p className="text-[10px] text-white/30 mt-1">
-                        Endpoint: http://localhost:11434/api/generate (llama3)
-                      </p>
-                    </div>
-                  )}
-                </div>
-
-                {/* Financial Impact Rows */}
-                <div className="grid grid-cols-2 gap-3 mt-4">
-                  <div className="p-3 rounded-xl bg-white/[0.03] border border-white/10">
-                    <div className="text-[11px] text-white/50">Baseline Monthly Bill</div>
-                    <div className="font-mono text-base font-bold text-white tabular-nums mt-0.5">
-                      {financials.baselineBill.toLocaleString()} JD
-                    </div>
-                  </div>
-
-                  <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
-                    <div className="text-[11px] text-emerald-300">Optimized Monthly Bill</div>
-                    <div className="font-mono text-base font-bold text-emerald-300 tabular-nums mt-0.5">
-                      {financials.optimizedBill.toLocaleString()} JD
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Annual ROI Potential Pill */}
-              <div className="mt-4 p-3 rounded-xl bg-white/[0.03] border border-white/10 flex items-center justify-between text-xs font-mono">
-                <span className="text-white/60">Annual Plant Pulse ROI Potential:</span>
-                <span className="font-bold text-emerald-300">
-                  {financials.annualRoi.toLocaleString()} JD / year ({financials.savePercent}% saved)
-                </span>
-              </div>
-            </motion.div>
-
-          </div>
-
-        </main>
+          <p className="sheet-foot">
+            Live readings from ThingSpeak; the energy and vibration panels are simulated. Prices follow the EMRC medium-industry schedule.
+          </p>
+        </div>
       </div>
     </div>
   );

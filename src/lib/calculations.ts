@@ -1,103 +1,82 @@
 // ============================================================================
-// Plant Pulse — Energy & Machine Health Calculation Engine
+// Plant Pulse — tariff and billing rules, the single source for the dashboard
 // EMRC Medium-Industry Tariff Schedule for Zarqa, Jordan
 // ============================================================================
 
-export interface TariffPeriod {
-  label: string;
-  range: string;
+export type Band = 'Off-Peak' | 'Partial-Peak' | 'Peak';
+
+export interface TariffSegment {
+  start: number; // hour, inclusive
+  end: number; // hour, exclusive
+  band: Band;
   rate: number; // fils/kWh
-  color: string;
-  hours: number;
 }
 
-export const TARIFF_SCHEDULE: TariffPeriod[] = [
-  { label: 'Off-Peak', range: '05:00 – 14:00', rate: 59, color: '#22c55e', hours: 9 },
-  { label: 'Partial Peak', range: '14:00 – 17:00', rate: 69, color: '#f59e0b', hours: 3 },
-  { label: 'Peak', range: '17:00 – 23:00', rate: 79, color: '#ef4444', hours: 6 },
-  { label: 'Partial Peak', range: '23:00 – 05:00', rate: 69, color: '#f59e0b', hours: 6 },
+export const TARIFF_SEGMENTS: TariffSegment[] = [
+  { start: 0, end: 5, band: 'Partial-Peak', rate: 69 },
+  { start: 5, end: 14, band: 'Off-Peak', rate: 59 },
+  { start: 14, end: 17, band: 'Partial-Peak', rate: 69 },
+  { start: 17, end: 23, band: 'Peak', rate: 79 },
+  { start: 23, end: 24, band: 'Partial-Peak', rate: 69 },
+];
+
+// One row per band, for legends
+export const BANDS: { band: Band; hours: string; rate: number }[] = [
+  { band: 'Off-Peak', hours: '05–14', rate: 59 },
+  { band: 'Partial-Peak', hours: '14–17, 23–05', rate: 69 },
+  { band: 'Peak', hours: '17–23', rate: 79 },
 ];
 
 export const BASELINE_KWH_MONTH = 500_000;
 
-export function getCurrentTariff(hour: number): TariffPeriod {
-  if (hour >= 5 && hour < 14) return TARIFF_SCHEDULE[0];
-  if (hour >= 14 && hour < 17) return TARIFF_SCHEDULE[1];
-  if (hour >= 17 && hour < 23) return TARIFF_SCHEDULE[2];
-  return TARIFF_SCHEDULE[3]; // 23:00–05:00 partial
+export function getTariffByHour(hour: number): TariffSegment {
+  const h = ((hour % 24) + 24) % 24;
+  return TARIFF_SEGMENTS.find((s) => h >= s.start && h < s.end) ?? TARIFF_SEGMENTS[0];
 }
 
-export function getTariffRate(hour: number): number {
-  return getCurrentTariff(hour).rate;
-}
-
-// Power factor penalty per EMRC steps (same steps as pfPenaltyFor in App.jsx)
-export function getPowerFactorPenalty(pf: number): number {
-  if (pf >= 0.90) return 0;
-  if (pf >= 0.85) return 0.015; // 1.5%
-  if (pf >= 0.80) return 0.035; // 3.5%
-  if (pf >= 0.75) return 0.065; // 6.5%
-  return 0.12;                   // 12%
-}
-
-export interface ScenarioInputs {
-  timeOfDay: number;       // 0–23
-  powerFactor: number;     // 0.60–1.00
-  peakShiftPct: number;    // 0–100% of peak load moved to off-peak
-  bearingWear: number;     // 0–100%
-}
-
-export interface KPIResults {
-  plantLoad: number;           // kW
-  energyCostThisHour: number;  // JD
-  pumpHealth: number;          // 0–100%
-  currentTariff: TariffPeriod;
-  vibrationLevel: number;
-}
-
-export function computeKPIs(inputs: ScenarioInputs): KPIResults {
-  const { timeOfDay, powerFactor, peakShiftPct, bearingWear } = inputs;
-
-  const tariff = getCurrentTariff(timeOfDay);
-
-  // Base load varies by time of day (simulating plant activity)
-  const baseLoadProfile: Record<string, number> = {
-    'Off-Peak': 620,
-    'Partial Peak': 780,
-    'Peak': 920,
-  };
-  let baseLoad = baseLoadProfile[tariff.label] || 780;
-
-  // Peak shift reduces peak load proportionally
-  if (tariff.label === 'Peak') {
-    baseLoad *= (1 - peakShiftPct / 100);
-  } else if (tariff.label === 'Off-Peak') {
-    // Shifted load adds to off-peak
-    baseLoad += (920 * peakShiftPct / 100) * 0.3;
-  }
-
-  // Power factor affects apparent load
-  const apparentLoad = baseLoad / Math.max(powerFactor, 0.60);
-  const plantLoad = Math.round(apparentLoad);
-
-  // Energy cost for this hour in JD (rate is fils, 1 JD = 1000 fils)
-  const pfPenalty = getPowerFactorPenalty(powerFactor);
-  const rawCost = (plantLoad * tariff.rate) / 1000;
-  const energyCostThisHour = rawCost * (1 + pfPenalty);
-
-  // Pump health inversely proportional to bearing wear
-  const pumpHealth = Math.max(5, 100 - bearingWear * 0.92 - (bearingWear > 70 ? (bearingWear - 70) * 0.5 : 0));
-
-  // Vibration level increases with bearing wear
-  const vibrationLevel = 0.5 + (bearingWear / 100) * 8.5;
-
+// Time until the rate next changes, and what it changes to
+export function getCountdown(hour: number): { countdownText: string; targetBand: Band; targetTime: string } {
+  const norm = ((hour % 24) + 24) % 24;
+  let targetHour: number;
+  let targetBand: Band;
+  if (norm < 5) [targetHour, targetBand] = [5, 'Off-Peak'];
+  else if (norm < 14) [targetHour, targetBand] = [14, 'Partial-Peak'];
+  else if (norm < 17) [targetHour, targetBand] = [17, 'Peak'];
+  else if (norm < 23) [targetHour, targetBand] = [23, 'Partial-Peak'];
+  else [targetHour, targetBand] = [29, 'Off-Peak']; // 23–05 is one partial-peak stretch, next change is 05:00
+  const mins = Math.max(1, Math.round((targetHour - norm) * 60));
   return {
-    plantLoad,
-    energyCostThisHour: Math.round(energyCostThisHour * 100) / 100,
-    pumpHealth: Math.round(pumpHealth),
-    currentTariff: tariff,
-    vibrationLevel: Math.round(vibrationLevel * 10) / 10,
+    countdownText: `${Math.floor(mins / 60)}h ${(mins % 60).toString().padStart(2, '0')}m`,
+    targetBand,
+    targetTime: `${(targetHour % 24).toString().padStart(2, '0')}:00`,
   };
+}
+
+// EMRC power-factor surcharge, in percent of the bill
+export function getPowerFactorSurchargePct(pf: number): number {
+  if (pf >= 0.9) return 0;
+  if (pf >= 0.85) return 1.5;
+  if (pf >= 0.8) return 3.5;
+  if (pf >= 0.75) return 6.5;
+  return 12;
+}
+
+// Same surcharge as a fraction (0.015 = 1.5%)
+export function getPowerFactorPenalty(pf: number): number {
+  return getPowerFactorSurchargePct(pf) / 100;
+}
+
+// Simulated plant load in kW (real power; a poor power factor is billed through
+// the surcharge above, not by inflating kW)
+const PEAK_HOURS = 6; // 17–23
+const OFF_PEAK_HOURS = 9; // 05–14
+export function loadAt(hour: number, peakShiftPct: number): number {
+  const band = getTariffByHour(hour).band;
+  // 45% of peak load is shiftable; whatever is shifted runs in off-peak hours instead
+  const shiftedKw = 940 * (peakShiftPct / 100) * 0.45;
+  if (band === 'Peak') return Math.round(940 - shiftedKw);
+  if (band === 'Off-Peak') return Math.round(640 + (shiftedKw * PEAK_HOURS) / OFF_PEAK_HOURS);
+  return 790;
 }
 
 export interface FinancialBreakdown {
@@ -108,107 +87,27 @@ export interface FinancialBreakdown {
   totalOptimizedBill: number;
 }
 
-export function computeFinancials(inputs: ScenarioInputs): FinancialBreakdown {
-  const { powerFactor, peakShiftPct } = inputs;
-
+// Monthly bill (JD) for BASELINE_KWH_MONTH and what shifting load and fixing PF save
+export function computeFinancials({ powerFactor, peakShiftPct }: { powerFactor: number; peakShiftPct: number }): FinancialBreakdown {
   // Baseline distribution: 25% peak, 30% partial, 45% off-peak
   const peakKWh = BASELINE_KWH_MONTH * 0.25;
-  const partialKWh = BASELINE_KWH_MONTH * 0.30;
+  const partialKWh = BASELINE_KWH_MONTH * 0.3;
   const offPeakKWh = BASELINE_KWH_MONTH * 0.45;
 
-  // Current bill (in JD, rate in fils → /1000)
-  const billCurrentHabits =
-    (peakKWh * 79 + partialKWh * 69 + offPeakKWh * 59) / 1000;
-
-  // Peak shift savings: move peakShiftPct of peak kWh to off-peak rate
+  // rates are fils/kWh, 1 JD = 1000 fils
+  const billCurrentHabits = (peakKWh * 79 + partialKWh * 69 + offPeakKWh * 59) / 1000;
   const shiftedKWh = peakKWh * (peakShiftPct / 100);
   const savedByPeakShift = (shiftedKWh * (79 - 59)) / 1000;
-
-  // Power factor penalty on total bill
-  const pfPenaltyRate = getPowerFactorPenalty(powerFactor);
-  const pfPenaltyAmount = billCurrentHabits * pfPenaltyRate;
-
-  // Saving if PF corrected to 0.95+
+  const pfPenaltyAmount = billCurrentHabits * getPowerFactorPenalty(powerFactor);
   const savingIfPFCorrected = pfPenaltyAmount;
-
   const totalOptimizedBill = billCurrentHabits - savedByPeakShift - savingIfPFCorrected;
 
+  const r2 = (x: number) => Math.round(x * 100) / 100;
   return {
-    billCurrentHabits: Math.round(billCurrentHabits * 100) / 100,
-    savedByPeakShift: Math.round(savedByPeakShift * 100) / 100,
-    pfPenaltyAmount: Math.round(pfPenaltyAmount * 100) / 100,
-    savingIfPFCorrected: Math.round(savingIfPFCorrected * 100) / 100,
-    totalOptimizedBill: Math.round(totalOptimizedBill * 100) / 100,
+    billCurrentHabits: r2(billCurrentHabits),
+    savedByPeakShift: r2(savedByPeakShift),
+    pfPenaltyAmount: r2(pfPenaltyAmount),
+    savingIfPFCorrected: r2(savingIfPFCorrected),
+    totalOptimizedBill: r2(totalOptimizedBill),
   };
-}
-
-// Simple seeded pseudo-random number generator (deterministic per seed)
-function seededRandom(seed: number): () => number {
-  let s = seed;
-  return () => {
-    s = (s * 16807 + 0) % 2147483647;
-    return (s - 1) / 2147483646;
-  };
-}
-
-// Generate realistic vibration spectrum data (deterministic)
-export function generateVibrationSpectrum(bearingWear: number): { freq: number; amplitude: number; baseline: number }[] {
-  const data: { freq: number; amplitude: number; baseline: number }[] = [];
-  const wearFactor = bearingWear / 100;
-  const rand = seededRandom(Math.floor(bearingWear * 1000 + 42));
-
-  for (let freq = 0; freq <= 1000; freq += 5) {
-    // Baseline vibration (healthy machine)
-    const baseline = 0.3 + Math.sin(freq * 0.02) * 0.1 + rand() * 0.08;
-
-    // Bearing defect frequencies (BPFO ~148Hz, BPFI ~236Hz, BSF ~97Hz, FTF ~12Hz)
-    let amplitude = baseline;
-
-    // Fundamental bearing frequencies amplified by wear
-    const defectFreqs = [12, 97, 148, 236, 296, 472, 592];
-    for (const df of defectFreqs) {
-      const dist = Math.abs(freq - df);
-      if (dist < 15) {
-        const peak = (1 - dist / 15) * wearFactor * (3.5 + rand() * 1.5);
-        amplitude += peak;
-      }
-    }
-
-    // Harmonic sidebands at high wear
-    if (wearFactor > 0.5) {
-      const harmonics = [24, 194, 444, 710];
-      for (const h of harmonics) {
-        const dist = Math.abs(freq - h);
-        if (dist < 10) {
-          amplitude += (1 - dist / 10) * (wearFactor - 0.5) * 2;
-        }
-      }
-    }
-
-    // Broadband noise increase with wear
-    amplitude += wearFactor * 0.3 * rand();
-
-    data.push({
-      freq,
-      amplitude: Math.round(amplitude * 100) / 100,
-      baseline: Math.round(baseline * 100) / 100,
-    });
-  }
-
-  return data;
-}
-
-// Sparkline data generator (deterministic)
-export function generateSparkline(current: number, variance: number, points: number = 20): number[] {
-  const data: number[] = [];
-  const rand = seededRandom(Math.floor(current * 1000 + variance * 100 + 7));
-  let value = current - variance * 0.5;
-  for (let i = 0; i < points; i++) {
-    value += (rand() - 0.48) * variance * 0.3;
-    value = Math.max(current - variance, Math.min(current + variance * 0.2, value));
-    data.push(Math.round(value * 100) / 100);
-  }
-  // Ensure last point is near current
-  data[data.length - 1] = current;
-  return data;
 }
